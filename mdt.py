@@ -930,7 +930,7 @@ def import_command(args):
                     path = "/networks/{networkId}" + sub_path
                     meraki_write_path(path, args.api_key, args.base_url, config_template_data, networkId=target_config_template_id)
             else:
-                event_handler("error", f"Skipping import of template {source_config_template["name"]}({source_config_template["id"]}) because it is not found in import data.")
+                event_handler("error", f"Skipping import of template {source_config_template['name']}({source_config_template['id']}) because it is not found in import data.")
     elif args.import_command == "networks":     
         target_networks = meraki_read_path("/organizations/{organizationId}/networks", args.api_key, args.base_url, organizationId=args.org_id)
         if args.source_network_id in import_data["networks"]:
@@ -986,7 +986,7 @@ def import_command(args):
 
 
                 if "configTemplateId" in target_network and target_network["configTemplateId"] != target_config_template_id:
-                    event_handler("error", f"Target network bound to wrong template ({target_config_template_id} != {target_network["configTemplateId"]}). We need to unbind and rebind this template")
+                    event_handler("error", f"Target network bound to wrong template ({target_config_template_id} != {target_network['configTemplateId']}). We need to unbind and rebind this template")
                 elif "configTemplateId" in target_network and target_network["configTemplateId"] == target_config_template_id:
                     # No change needed
                     pass
@@ -1022,7 +1022,7 @@ def import_command(args):
                     if stack["name"] in target_stack_map:
                         source_stack_map[stack["id"]] = target_stack_map[stack["name"]]["id"]
                     else:
-                        event_handler("error", f"Mapping for source stack {stack["name"]} ({stack["id"]}) not found")
+                        event_handler("error", f"Mapping for source stack {stack['name']} ({stack['id']}) not found")
             for sub_path, network_data in source_network_paths.items():
                 if args.product_types and (sub_path.split('/')[1] in PRODUCT_TYPES and sub_path.split('/')[1] not in args.product_types):
                     logging.debug(f"Skipping {sub_path}")
@@ -1043,7 +1043,7 @@ def import_command(args):
                     print (f"Stack: {source_switchStackId}")
                     if source_switchStackId in source_stack_map:
                         kwargs["switchStackId"] = source_stack_map[source_switchStackId]
-                        event_handler("debug", f"Mapping source stack: {source_switchStackId} = {kwargs["switchStackId"]}")
+                        event_handler("debug", f"Mapping source stack: {source_switchStackId} = {kwargs['switchStackId']}")
                     else:
                         event_handler("error", f"Mapping for source stack {source_switchStackId} not found")
                         continue
@@ -1053,7 +1053,7 @@ def import_command(args):
                 #        
                 meraki_write_path(path, args.api_key, args.base_url, network_data, **kwargs)
         else:
-            event_handler("error", f"Skipping import of network {source_network_data["name"]}({source_network_data["id"]}) because it is not found in import data.")
+            event_handler("error", f"Skipping import of network {source_network_data['name']}({source_network_data['id']}) because it is not found in import data.")
     elif args.import_command == "devices":
         for serial in import_data["devices"]:
             if args.serials != None and serial not in args.serials:
