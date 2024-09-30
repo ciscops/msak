@@ -513,11 +513,11 @@ def meraki_write_path(path, api_key, base_url, raw_payload, api_handler=False, *
         if show_diff:
             print(color_message(path.format(**kwargs), "yellow"))
             if not write_only_url:
-                print ("Current:")
-                pprint.pp(filtered_current_data)
-                print ("New:")
-                pprint.pp(filtered_payload)
-                print ("Diff:")
+                # print ("Current:")
+                # pprint.pp(filtered_current_data)
+                # print ("New:")
+                # pprint.pp(filtered_payload)
+                # print ("Diff:")
                 pprint.pp(diff_dict)
     else:
         change_needed = False
@@ -630,7 +630,7 @@ def filter_data_by_schema(data, schema):
     else:
         return data
 
-def print_tabular_data(data, columns_to_display):
+def print_tabular_data(data, columns_to_display, sort_by=None, ascending=True):
     """
     Formats and prints JSON-like data in a tabular format with left-justified headers and data.
     
@@ -640,6 +640,10 @@ def print_tabular_data(data, columns_to_display):
     """
     # Convert the list of dictionaries to a pandas DataFrame
     df = pd.DataFrame(data)
+
+    # Sort the DataFrame by the specified column if provided
+    if sort_by:
+        df = df.sort_values(by=sort_by, ascending=ascending)
 
     # Calculate the max width for each column to apply uniform left-justification
     max_col_widths = {col: max(df[col].astype(str).map(len).max(), len(col)) for col in columns_to_display}
@@ -670,9 +674,23 @@ async def export_command(args):
     config_template_ids = []
     stacks_by_network = {}
     parameters = []
+    serial_parameters = []
     if args.network_ids:
         network_ids = args.networks
+        for network_id in network_ids:
+            parameters.append(f"networkIds[]={network_id}")
+        networks = meraki_read_path("/organizations/{organizationId}/networks", args.api_key, args.base_url, organizationId=args.org_id, parameters=parameters)
+        serial_parameters = parameters
+    elif args.tags:
+        parameters = ['tagsFilterType=withAnyTags']
+        for tag in args.tags:
+            parameters.append(f"tags[]={tag}")
+        networks = meraki_read_path("/organizations/{organizationId}/networks", args.api_key, args.base_url, organizationId=args.org_id, parameters=parameters)
+        for network in networks:
+            serial_parameters.append(f"networkIds[]={network['id']}")
+
     elif args.networks:
+        networks = []
         # Create a dict of networks by name
         network_list = meraki_read_path("/organizations/{organizationId}/networks", args.api_key, args.base_url, organizationId=args.org_id)
         networks_by_name = {network['name']: network for network in network_list}
@@ -680,24 +698,26 @@ async def export_command(args):
         for network_name in args.networks:
             for key in networks_by_name.keys():
                 if network_name in key:
+                    networks.append(networks_by_name[key])
                     network_id = networks_by_name[key].get('id')
+                    serial_parameters.append(f"networkIds[]={network_id}")
                     network_ids.append(network_id)
 
-    if network_ids:
-        networks = []
-        template_ids =[]
-        for network_id in network_ids:
-            network = meraki_read_path("/networks/{networkId}", args.api_key, args.base_url, networkId=network_id)
-            networks.append(network)
-            parameters.append(f"networkIds[]={network_id}")
+    # if network_ids:
+    #     networks = []
+    #     template_ids =[]
+    #     for network_id in network_ids:
+    #         network = meraki_read_path("/networks/{networkId}", args.api_key, args.base_url, networkId=network_id)
+    #         networks.append(network)
+    #         parameters.append(f"networkIds[]={network_id}")
 
-            #
-            # Collect the config templates that the networks are bound to
-            #                
-            if "isBoundToConfigTemplate" in network and network["isBoundToConfigTemplate"] == True:
-                if network["configTemplateId"] not in template_ids:
-                    template_ids.append(network["configTemplateId"])
-        network_ids.extend(template_ids)
+    #         #
+    #         # Collect the config templates that the networks are bound to
+    #         #                
+    #         if "isBoundToConfigTemplate" in network and network["isBoundToConfigTemplate"] == True:
+    #             if network["configTemplateId"] not in template_ids:
+    #                 template_ids.append(network["configTemplateId"])
+    #     network_ids.extend(template_ids)
     else:
         event_handler("info", f"Exporting all networks for organization {args.org_id}")
         networks = meraki_read_path("/organizations/{organizationId}/networks", args.api_key, args.base_url, organizationId=args.org_id)
@@ -713,7 +733,7 @@ async def export_command(args):
     #
     # Get all of the devices for export
     #
-    devices = meraki_read_path("/organizations/{organizationId}/devices", args.api_key, args.base_url, organizationId=args.org_id, parameters=parameters)
+    devices = meraki_read_path("/organizations/{organizationId}/devices", args.api_key, args.base_url, organizationId=args.org_id, parameters=serial_parameters)
     # List comprehension to extract serial numbers
     serial_numbers = [item["serial"] for item in devices]
     for network in networks:
@@ -821,16 +841,6 @@ async def export_command(args):
                 else:
                     path_exported = True    
                     api_paths.append(f"/organizations/{args.org_id}" + sub_path)
-
-            # match = re.match('^/([^/]+)/{[^{}]+}/?([^{}]*)$', path)
-            # if match:
-            #     path_exported = True
-            #     sub_path = '/' + match.group(2)
-            #     if match.group(1) == "networks":
-            #         for network_id in network_ids:
-            #             api_paths.append(f"/networks/{network_id}" + sub_path)                        
-            #         for config_template_id in config_template_ids:
-            #             api_paths.append(f"/networks/{config_template_id}" + sub_path)
                     
             #
             # /devices/{serial}
@@ -903,11 +913,19 @@ def show_command(args):
             parameters.append(f"tags[]={tag}")
 
     if args.show_command == 'networks':
-        networks = meraki_read_path("/organizations/{organizationId}/networks", args.api_key, args.base_url, organizationId=args.org_id)
+        # If a data file is provided, use that data instead of making an API call
+        if args.input_file:
+            import_data = import_file(args.input_file)
+            networks = []
+            for network_id, network_data in import_data["networks"].items():
+                if "/" in network_data["paths"]:
+                    networks.append(network_data["paths"]["/"])
+        else:
+            networks = meraki_read_path("/organizations/{organizationId}/networks", args.api_key, args.base_url, organizationId=args.org_id)
         if args.json:
             pprint.pp(networks)
         else:
-            print_tabular_data(networks, ['id', 'name', 'productTypes', 'timeZone', 'tags'])      
+            print_tabular_data(networks, ['name', 'id', 'productTypes', 'timeZone', 'tags'], sort_by='name')      
     elif args.show_command == 'organizations':
         organizations = meraki_read_path("/organizations", args.api_key, args.base_url)
         if args.json:
@@ -915,11 +933,38 @@ def show_command(args):
         else:
             print_tabular_data(organizations, ['id', 'name'])       
     elif args.show_command == 'devices':
-        devices = meraki_read_path("/organizations/{organizationId}/devices", args.api_key, args.base_url, organizationId=args.org_id)
+        # If a data file is provided, use that data instead of making an API call
+        if args.input_file:
+            import_data = import_file(args.input_file)
+            source_org_id = next(iter(import_data["organizations"]))
+            networks = import_data["organizations"][source_org_id]["paths"]["/networks"]
+            networks_by_id = {network['id']: network for network in networks}            
+            devices = []
+            for serial, device_data in import_data["devices"].items():
+                if "/" in device_data["paths"]:
+                    device = device_data["paths"]["/"]
+                    if device["networkId"] in networks_by_id:
+                        device["network"] = networks_by_id[device["networkId"]]["name"]
+                    else:
+                        device["network"] = device["networkId"]
+                    devices.append(device)
+
+        else:
+            devices = meraki_read_path("/organizations/{organizationId}/devices", args.api_key, args.base_url, organizationId=args.org_id)
+            networks = meraki_read_path("/organizations/{organizationId}/networks", args.api_key, args.base_url, organizationId=args.org_id)
+            networks_by_id = {network['id']: network for network in networks}
+            #
+            # Convert Network ID to Network Name
+            #
+            for device in devices:
+                if device["networkId"] in networks_by_id:
+                    device["network"] = networks_by_id[device["networkId"]]["name"]
+                else:
+                    device["network"] = device["networkId"]
         if args.json:
             pprint.pp(devices)
         else:
-            print_tabular_data(devices, ['name', 'serial', 'mac', 'model', 'networkId', 'tags'])
+            print_tabular_data(devices, ['name', 'serial', 'mac', 'model', 'network', 'tags'], sort_by='network')
     elif args.show_command == 'templates':
         templates = meraki_read_path("/organizations/{organizationId}/configTemplates", args.api_key, args.base_url, organizationId=args.org_id)
         if args.json:
@@ -1509,6 +1554,7 @@ def parse_app_args(arguments=None):
     parser_export.set_defaults(func=export_command)
     parser_export.add_argument('-o', '--output_file', type=str, help='The path to the output JSON file.')
     parser_export.add_argument('--org-id', help='Org ID', default=os.getenv('MERAKI_ORG_ID'), type=str)
+    parser_export.add_argument('--tags', nargs='+', help='A list of network tags to export.')
     parser_export.add_argument('--networks', nargs='+', help='A list of network IDs to export.')
     parser_export.add_argument('--network_ids', nargs='+', help='A list of network IDs to export.')
     parser_export.add_argument('--full-export', help='Export all paths', action='store_true')
@@ -1526,6 +1572,7 @@ def parse_app_args(arguments=None):
     parser_show_networks = show_subparsers.add_parser('networks', help='Show networks')
     parser_show_networks.add_argument('--org-id', help='Org ID', default=os.getenv('MERAKI_ORG_ID'), type=str)
     parser_show_networks.add_argument('--tags', nargs='+', help='Filter by tags')
+    parser_show_networks.add_argument('-i', '--input-file', type=str, help='The path to the output JSON file.')
 
     # Subcommand: `show organizations`
     parser_show_organizations = show_subparsers.add_parser('organizations', help='Show organizations')
@@ -1534,6 +1581,7 @@ def parse_app_args(arguments=None):
     parser_show_devices = show_subparsers.add_parser('devices', help='Show devices')
     parser_show_devices.add_argument('--network', type=str, help='Filter by network ID')
     parser_show_devices.add_argument('--org-id', help='Org ID', default=os.getenv('MERAKI_ORG_ID'), type=str)
+    parser_show_devices.add_argument('-i', '--input-file', type=str, help='The path to the output JSON file.')
 
     # Subcommand: `show templates`
     parser_show_templates = show_subparsers.add_parser('templates', help='Show templates')
