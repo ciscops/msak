@@ -856,7 +856,7 @@ async def export_command(args):
                     for device in devices:
                         device_type = get_product_type(device["model"])
                         if sub_path == "/" or device_type in get_tags:
-                            api_paths.append(f"/devices/{device["serial"]}" + sub_path)
+                            api_paths.append(f"/devices/{device['serial']}" + sub_path)
             #
             # "/devices/{serial}/switch/routing/interfaces/{interfaceId}"
             #
@@ -971,6 +971,52 @@ def show_command(args):
             pprint.pp(templates)
         else:
             print_tabular_data(templates, ['id', 'name', 'productTypes', 'timeZone'])
+    elif args.show_command == 'admins':
+        # If a data file is provided, use that data instead of making an API call
+        if args.input_file:
+            import_data = import_file(args.input_file)
+            source_org_id = next(iter(import_data["organizations"]))            
+            if "/admins" in import_data["organizations"][source_org_id]["paths"]:
+                admins = import_data["organizations"][source_org_id]["paths"]["/admins"]
+            else:
+                admins = []
+            networks = []
+            # Need to get networks to dereference IDs
+            for network_id, network_data in import_data["networks"].items():
+                if "/" in network_data["paths"]:
+                    networks.append(network_data["paths"]["/"])
+        else:
+            admins = meraki_read_path("/organizations/{organizationId}/admins", args.api_key, args.base_url, organizationId=args.org_id)
+            # Need to get networks to dereference IDs
+            networks = meraki_read_path("/organizations/{organizationId}/networks", args.api_key, args.base_url, organizationId=args.org_id)
+
+
+        # Dereference the network IDs to network names
+        networks_by_id = {network['id']: network for network in networks}
+        for admin in admins:
+            for item in admin['networks']:
+                if item["id"] in networks_by_id:
+                    item["name"] = networks_by_id[item["id"]]["name"]
+                    item.pop("id")
+
+        if args.json:
+            pprint.pp(admins)
+        elif args.csv:
+            # Convert the list of dicts to a DataFrame
+            df = pd.DataFrame(admins)
+
+            # Print the DataFrame as CSV to the console
+            # print(df.to_csv(index=False))
+
+            # Alternatively, you can save the CSV to a file
+            if args.output_file:
+                output_file = args.output_file
+            else:
+                output_file = f"{args.org_id}_admins.csv"
+            df.to_csv(output_file, index=False)
+
+        else:
+            print_tabular_data(admins, ['name', 'email', 'accountStatus', 'hasApiKey', 'lastActive', 'networks'], sort_by='name')      
     elif args.show_command == 'me':
         organizations = meraki_read_path("/organizations", args.api_key, args.base_url)
         me = meraki_read_path("/administered/identities/me", args.api_key, args.base_url)
@@ -1572,6 +1618,7 @@ def parse_app_args(arguments=None):
     parser_show_networks = show_subparsers.add_parser('networks', help='Show networks')
     parser_show_networks.add_argument('--org-id', help='Org ID', default=os.getenv('MERAKI_ORG_ID'), type=str)
     parser_show_networks.add_argument('--tags', nargs='+', help='Filter by tags')
+    parser_show_networks.add_argument('--json', help='Show output in JSON', action='store_true')
     parser_show_networks.add_argument('-i', '--input-file', type=str, help='The path to the output JSON file.')
 
     # Subcommand: `show organizations`
@@ -1582,6 +1629,7 @@ def parse_app_args(arguments=None):
     parser_show_devices.add_argument('--network', type=str, help='Filter by network ID')
     parser_show_devices.add_argument('--org-id', help='Org ID', default=os.getenv('MERAKI_ORG_ID'), type=str)
     parser_show_devices.add_argument('-i', '--input-file', type=str, help='The path to the output JSON file.')
+    parser_show_devices.add_argument('--json', help='Show output in JSON', action='store_true')
 
     # Subcommand: `show templates`
     parser_show_templates = show_subparsers.add_parser('templates', help='Show templates')
@@ -1590,6 +1638,13 @@ def parse_app_args(arguments=None):
     # Subcommand: `show me`
     parser_show_templates = show_subparsers.add_parser('me', help='Show Current User')
     parser_show_templates.add_argument('--org-id', help='Org ID', default=os.getenv('MERAKI_ORG_ID'), type=str)    
+
+    # Subcommand: `show admins`
+    parser_show_admins = show_subparsers.add_parser('admins', help='Show Current User')
+    parser_show_admins.add_argument('-i', '--input-file', type=str, help='The path to the output JSON file.')
+    parser_show_admins.add_argument('--json', help='Show output in JSON', action='store_true')
+    parser_show_admins.add_argument('--csv', help='Show output in CSV', action='store_true')
+    parser_show_admins.add_argument('-o', '--output_file', type=str, help='The path to the output file.')
 
     #
     # Subparser for `import` command
