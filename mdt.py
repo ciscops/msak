@@ -44,6 +44,10 @@ PRODUCT_TYPES_MAP = {
     'switch': ['MX']
 }
 
+readonly_exceptions = [
+    "/organizations/{organizationId}/inventory/devices"
+]
+
 index_lookup = {
     "/networks/{networkId}/switch/accessPolicies": "accessPolicyNumber",
     "/networks/{networkId}/wireless/ssids": "number",
@@ -756,15 +760,13 @@ async def export_command(args):
     for path, verbs in openapi_spec['paths'].items():
         # Only get paths that we can write something back to.
         path_exported = False
-        # if args.full_export:
-        #     pass    
         if path in config["api_path_exlude"]:
             event_handler("debug", f"{path} is excuded")
             continue
         elif 'get' not in verbs.keys():
             event_handler("debug", f"{path} is write-only")
             continue
-        elif len(verbs) == 1 and "get" in verbs:
+        elif (len(verbs) == 1 and "get" in verbs) and not (args.full and path in readonly_exceptions):
             event_handler("debug", f"{path} is read-only")
             continue               
         else:
@@ -773,6 +775,8 @@ async def export_command(args):
             # /networks/{networkId}: We need to itterate over all of the networks
             #
             if match := re.match('^/networks/{networkId}/?(.*)$', path):
+                if args.contexts and not 'networks' in args.contexts:
+                    continue
                 base_path = "/networks/{networkId}"
                 sub_path = "/" + match.group(1)
                 for network in networks:
@@ -846,6 +850,8 @@ async def export_command(args):
             # /devices/{serial}
             #
             elif match := re.match('^/devices/{serial}/?(.*)$', path):
+                if args.contexts and not 'devices' in args.contexts:
+                    continue
                 sub_path = '/' + match.group(1)
                 if match := re.match('^/[^{}]+{', sub_path):
                     # Unhandled paths because they need more dereferencing
@@ -965,6 +971,18 @@ def show_command(args):
             pprint.pp(devices)
         else:
             print_tabular_data(devices, ['name', 'serial', 'mac', 'model', 'network', 'tags'], sort_by='network')
+    elif args.show_command == 'inventory':
+        # If a data file is provided, use that data instead of making an API call
+        if args.input_file:
+            import_data = import_file(args.input_file)
+            source_org_id = next(iter(import_data["organizations"]))
+            inventory = import_data["organizations"][source_org_id]["paths"]["/inventory/devices"]
+        else:
+            inventory = meraki_read_path("/organizations/{organizationId}/inventory/devices", args.api_key, args.base_url, organizationId=args.org_id)
+        if args.json:
+            pprint.pp(inventory)
+        else:
+            print_tabular_data(inventory, ['name', 'serial', 'mac', 'model', 'tags'], sort_by='model')
     elif args.show_command == 'templates':
         templates = meraki_read_path("/organizations/{organizationId}/configTemplates", args.api_key, args.base_url, organizationId=args.org_id)
         if args.json:
@@ -1253,114 +1271,146 @@ def import_command(args):
 
 def claim_command(args):
     claim_list = []
-    import_data = {}
-    if args.input_file:
-        import_data = import_file(args.input_file)
-    # We always get the list of networks from the API for the target network
-    target_network_list = meraki_read_path("/organizations/{organizationId}/networks", args.api_key, args.base_url, organizationId=args.org_id)
-    # Create a dict of networks by name
-    target_networks_by_name = {network['name']: network for network in target_network_list}
-    target_networks_by_id = {network['id']: network for network in target_network_list}
 
-    # First, check to see if the target network ID or name is provided.  It name, need to convert to ID
-    target_network_id = None
-    if args.network_id:
-        target_network_id = args.network_id
-    elif args.network:
-        # Find matches and retrieve their networkId
-        for key in target_networks_by_name.keys():
-            if args.network in key:
-                if target_network_id:
-                    event_handler("critical", f"Multiple networks found with name {args.network}")
-                target_network_name = target_networks_by_name[key].get('name')
-                target_network_id = target_networks_by_name[key].get('id')
-
-    # now that we have the source and target network IDs, we need to get the list of devices to claim
-    if args.serials:
-        claim_list = args.serials
-        if target_network_id:
-            print (f"Claiming {claim_list} into network {target_network_name} ({target_network_id})")
+    if args.inventory:
+        if args.serials:
+            claim_list = args.serials
+        elif args.input_file:
+            import_data = import_file(args.input_file)
+            source_org_id = next(iter(import_data["organizations"]))
+            inventory = import_data["organizations"][source_org_id]["paths"]["/inventory/devices"]
+            claim_list = [item["serial"] for item in inventory]
+        
+        if claim_list:
+            print (f"Claim {claim_list} into inventory")
             answer = prompt_user(f"Proceed?", ["Yes", "No"])
             if answer == "Yes":
-                claim_serials(claim_list, target_network_id)
+                claim_serials_into_inventory(claim_list)
         else:
-            event_handler("critical", "Target network ID must be provided when serials are provided.")
-    # Next, check to see if an export file was proved.  If so, we need to get the list of devices from the file
-    elif import_data:
-        # If an input file is provided, we get the list of devices from the file
-        org_keys = list(import_data["organizations"].keys())
-        source_network_list = import_data["organizations"][org_keys[0]]["paths"]["/networks"]
-        device_by_serial = import_data["devices"]
-
-        # If we have an export file, we need to figure out the network from which to get the devices to claim.
-        # If we were given a specific source-network, then then use it.  Otherwise, use the target network name.
-        source_network_id = None
-        if args.source_network_id:
-            source_network_id = args.source_network_id
-        elif args.source_network_name:
-            # Create a dict of networks by name
-            source_networks_by_name = {network['name']: network for network in source_network_list}
-            # Find matches and retrieve their networkId
-            for key in source_networks_by_name.keys():
-                if args.source_network_name in key:
-                    if source_network_id:
-                        event_handler("critical", f"Multiple networks found with name {args.source_network_name}")
-                    source_network_id = source_networks_by_name[key].get('id')
-                    source_network_name = source_networks_by_name[key].get('name')
-        elif args.network:
-            # Create a dict of networks by name
-            source_networks_by_name = {network['name']: network for network in source_network_list}
-            # Find matches and retrieve their networkId
-            for key in source_networks_by_name.keys():
-                if args.network in key:
-                    if source_network_id:
-                        event_handler("critical", f"Multiple networks found with name {args.network}")
-                    source_network_id = source_networks_by_name[key].get('id')
-                    source_network_name = source_networks_by_name[key].get('name')
-
-        if source_network_id:
-            event_handler("debug", f"Claiming from network {source_network_id}")
-        else:
-            claim_by_network = {}
-            event_handler("debug", "Claiming all devices in import file.")
-            source_networks_by_id = {network['id']: network for network in source_network_list}
-            devices = import_data["devices"]
-            for device in devices:
-                device_data = devices[device]["paths"]["/"]
-                if device_data["networkId"] in source_networks_by_id:
-                    target_network_name = source_networks_by_id[device_data["networkId"]]["name"]
-                    event_handler("debug", f"Found {device_data['serial']} in {target_network_name}")
-                else:
-                    event_handler("error", "Unable to find source network for device {device_data['serial']}")
-                    continue
-                if target_network_name in target_networks_by_name:
-                    target_network_id = target_networks_by_name[target_network_name]["id"]
-                    event_handler("debug", f"Found Target network ID {target_network_id}")
-                else:
-                    event_handler("error", f"Unable to find target network ID for {target_network_name}")
-                    continue
-                if target_network_id in claim_by_network:
-                    claim_by_network[target_network_id].append(device_data["serial"])
-                else:
-                    claim_by_network[target_network_id] = [device_data["serial"]]
-            pprint.pp(claim_by_network)
-            answer = prompt_user(f"Proceed?", ["Yes", "No"])
-            if answer == "Yes":            
-                for target_network_id, serials in claim_by_network.items():
-                    event_handler("info", f"Claiming {serials} in network {target_networks_by_id[target_network_id]['name']} ({target_network_id})")
-                    claim_serials(serials, target_network_id)
+            event_handler("info", "No serials to claim")
     else:
-        event_handler("critical", "Input file must be provided when serials is not provided.")   
+        import_data = {}
+        if args.input_file:
+            import_data = import_file(args.input_file)
+        # We always get the list of networks from the API for the target network
+        target_network_list = meraki_read_path("/organizations/{organizationId}/networks", args.api_key, args.base_url, organizationId=args.org_id)
+        # Create a dict of networks by name
+        target_networks_by_name = {network['name']: network for network in target_network_list}
+        target_networks_by_id = {network['id']: network for network in target_network_list}
 
-    # else:
-    #     if import_data:
-    #         devices = import_data["devices"]
-    #         for serial in devices:
-    #             device_data = devices[serial]["paths"]["/"]
-    #             if source_network_id == device_data["networkId"]:
-    #                 claim_list.append(serial)
+        # First, check to see if the target network ID or name is provided.  It name, need to convert to ID
+        target_network_id = None
+        if args.network_id:
+            target_network_id = args.network_id
+        elif args.network:
+            # Find matches and retrieve their networkId
+            for key in target_networks_by_name.keys():
+                if args.network in key:
+                    if target_network_id:
+                        event_handler("critical", f"Multiple networks found with name {args.network}")
+                    target_network_name = target_networks_by_name[key].get('name')
+                    target_network_id = target_networks_by_name[key].get('id')
 
-def claim_serials(serials, network_id):
+        # now that we have the source and target network IDs, we need to get the list of devices to claim
+        if args.serials:
+            claim_list = args.serials
+            if target_network_id:
+                print (f"Claiming {claim_list} into network {target_network_name} ({target_network_id})")
+                answer = prompt_user(f"Proceed?", ["Yes", "No"])
+                if answer == "Yes":
+                    claim_serials_into_network(claim_list, target_network_id)
+            else:
+                event_handler("critical", "Target network ID must be provided when serials are provided.")
+        # Next, check to see if an export file was proved.  If so, we need to get the list of devices from the file
+        elif import_data:
+            # If an input file is provided, we get the list of devices from the file
+            org_keys = list(import_data["organizations"].keys())
+            source_network_list = import_data["organizations"][org_keys[0]]["paths"]["/networks"]
+            device_by_serial = import_data["devices"]
+
+            # If we have an export file, we need to figure out the network from which to get the devices to claim.
+            # If we were given a specific source-network, then then use it.  Otherwise, use the target network name.
+            source_network_id = None
+            if args.source_network_id:
+                source_network_id = args.source_network_id
+            elif args.source_network_name:
+                # Create a dict of networks by name
+                source_networks_by_name = {network['name']: network for network in source_network_list}
+                # Find matches and retrieve their networkId
+                for key in source_networks_by_name.keys():
+                    if args.source_network_name in key:
+                        if source_network_id:
+                            event_handler("critical", f"Multiple networks found with name {args.source_network_name}")
+                        source_network_id = source_networks_by_name[key].get('id')
+                        source_network_name = source_networks_by_name[key].get('name')
+            elif args.network:
+                # Create a dict of networks by name
+                source_networks_by_name = {network['name']: network for network in source_network_list}
+                # Find matches and retrieve their networkId
+                for key in source_networks_by_name.keys():
+                    if args.network in key:
+                        if source_network_id:
+                            event_handler("critical", f"Multiple networks found with name {args.network}")
+                        source_network_id = source_networks_by_name[key].get('id')
+                        source_network_name = source_networks_by_name[key].get('name')
+
+            if source_network_id:
+                event_handler("debug", f"Claiming from network {source_network_id}")
+            else:
+                claim_by_network = {}
+                event_handler("debug", "Claiming all devices in import file.")
+                source_networks_by_id = {network['id']: network for network in source_network_list}
+                devices = import_data["devices"]
+                for device in devices:
+                    device_data = devices[device]["paths"]["/"]
+                    if device_data["networkId"] in source_networks_by_id:
+                        target_network_name = source_networks_by_id[device_data["networkId"]]["name"]
+                        event_handler("debug", f"Found {device_data['serial']} in {target_network_name}")
+                    else:
+                        event_handler("error", "Unable to find source network for device {device_data['serial']}")
+                        continue
+                    if target_network_name in target_networks_by_name:
+                        target_network_id = target_networks_by_name[target_network_name]["id"]
+                        event_handler("debug", f"Found Target network ID {target_network_id}")
+                    else:
+                        event_handler("error", f"Unable to find target network ID for {target_network_name}")
+                        continue
+                    if target_network_id in claim_by_network:
+                        claim_by_network[target_network_id].append(device_data["serial"])
+                    else:
+                        claim_by_network[target_network_id] = [device_data["serial"]]
+                pprint.pp(claim_by_network)
+                answer = prompt_user(f"Proceed?", ["Yes", "No"])
+                if answer == "Yes":            
+                    for target_network_id, serials in claim_by_network.items():
+                        event_handler("info", f"Claiming {serials} in network {target_networks_by_id[target_network_id]['name']} ({target_network_id})")
+                        claim_serials_into_network(serials, target_network_id)
+        else:
+            event_handler("critical", "Input file must be provided when serials is not provided.")   
+
+
+    #     
+
+def claim_serials_into_inventory(serials):
+    #
+    # See what devices are already claimed in the network
+    #
+    unclaimed_serials = []
+    # Get the current inventory:
+    inventory = meraki_read_path("/organizations/{organizationId}/inventory/devices", args.api_key, args.base_url, organizationId=args.org_id)
+    inventory_serials = [item["serial"] for item in inventory]
+    unclaimed_serials = [serial for serial in serials if serial not in inventory_serials]
+    if unclaimed_serials:
+        for batch in batch_iterator(unclaimed_serials, args.batch_size):
+            claim_payload = {
+                "serials": batch
+            }
+            event_handler("info", f"Claiming {batch} into inventory")
+            meraki_write_path("/organizations/{organizationId}/claim", args.api_key, args.base_url, claim_payload, organizationId=args.org_id)
+    else:
+        event_handler("info", f"No serials to claim in inventory")
+
+def claim_serials_into_network(serials, network_id):
     #
     # See what devices are already claimed in the network
     #
@@ -1373,12 +1423,13 @@ def claim_serials(serials, network_id):
 
     unclaimed_serials = [serial for serial in serials if serial not in existing_serials]
     if unclaimed_serials:
-        claim_payload = {
-            "serials": unclaimed_serials,
-            "addAtomically": True
-        }
-        event_handler("debug", f"Claiming {serials} in network {network_id}")
-        meraki_write_path("/networks/{networkId}/devices/claim", args.api_key, args.base_url, claim_payload, networkId=network_id)
+        for batch in batch_iterator(unclaimed_serials, 50):
+            claim_payload = {
+                "serials": batch,
+                "addAtomically": True
+            }
+            event_handler("debug", f"Claiming {batch} in network {network_id}")
+            meraki_write_path("/networks/{networkId}/devices/claim", args.api_key, args.base_url, claim_payload, networkId=network_id)
     else:
         event_handler("debug", f"No serials to claim in network {network_id}")
 
@@ -1470,6 +1521,50 @@ def unclaim_command(args):
             meraki_write_path("/organizations/{organizationId}/inventory/release", args.api_key, args.base_url, payload, organizationId=args.org_id)
     else:
         event_handler("warning", "No devices to unclaim.")
+
+def batch_iterator(lst, batch_size):
+    # Generator to yield batches of the specified size
+    for i in range(0, len(lst), batch_size):
+        yield lst[i:i + batch_size]
+
+def release_command(args):
+    release_list = []
+
+    # If a data file is provided, use that data instead of making an API call
+    if args.input_file:
+        import_data = import_file(args.input_file)
+        source_org_id = next(iter(import_data["organizations"]))
+        inventory = import_data["organizations"][source_org_id]["paths"]["/inventory/devices"]
+    else:
+        inventory = meraki_read_path("/organizations/{organizationId}/inventory/devices", args.api_key, args.base_url, organizationId=args.org_id)
+
+    inventory_serials = [item["serial"] for item in inventory]
+
+    if args.serials:
+        # If we were given a list of serial numbers, we need to make sure they are in the inventory
+        for serial in args.serials:
+            if serial in inventory_serials:
+                release_list.append(serial)
+            else:
+                event_handler("error", f"Serial {serial} not found in inventory.")
+    elif args.input_file:
+        release_list = inventory_serials
+    else:
+        event_handler("critical", "Input file or serials argument must be provided.")
+
+    if release_list:
+        print (release_list)
+        answer = prompt_user(f"Release these devices from inventory?", ["Yes", "No"])
+        if answer == "Yes":
+            # Process the list in batches of 50
+            for batch in batch_iterator(release_list, args.batch_size):
+                payload = {
+                    "serials": batch
+                }
+                event_handler("info", f"Releasing: {batch}")
+                meraki_write_path("/organizations/{organizationId}/inventory/release", args.api_key, args.base_url, payload, organizationId=args.org_id)    
+    else:
+        event_handler("warning", "No devices to release.")
 
 def prompt_user(message, options):
     """
@@ -1603,51 +1698,12 @@ def parse_app_args(arguments=None):
     parser_export.add_argument('--tags', nargs='+', help='A list of network tags to export.')
     parser_export.add_argument('--networks', nargs='+', help='A list of network IDs to export.')
     parser_export.add_argument('--network_ids', nargs='+', help='A list of network IDs to export.')
-    parser_export.add_argument('--full-export', help='Export all paths', action='store_true')
-    parser_export.add_argument('--base-paths', nargs='+', default=['organizations','networks','devices'], choices=['organizations','networks','devices'], help='API base paths to import.')
+    parser_export.add_argument('--full', help='Export all paths', action='store_true')
+    parser_export.add_argument('--contexts', nargs='+', default=['organizations','networks','devices'], choices=['organizations','networks','devices', 'inventory'], help='API base paths to import.')
+
 
     #
-    # Subparser for `show` command
-    #
-    parser_show = subparsers.add_parser('show', help='Show resources')
-    parser_show.add_argument('--json', help='Show output in JSON', action='store_true')
-    parser_show.set_defaults(func=show_command)
-    show_subparsers = parser_show.add_subparsers(dest='show_command', help='Resources to show')
-
-    # Subcommand: `show networks`
-    parser_show_networks = show_subparsers.add_parser('networks', help='Show networks')
-    parser_show_networks.add_argument('--org-id', help='Org ID', default=os.getenv('MERAKI_ORG_ID'), type=str)
-    parser_show_networks.add_argument('--tags', nargs='+', help='Filter by tags')
-    parser_show_networks.add_argument('--json', help='Show output in JSON', action='store_true')
-    parser_show_networks.add_argument('-i', '--input-file', type=str, help='The path to the output JSON file.')
-
-    # Subcommand: `show organizations`
-    parser_show_organizations = show_subparsers.add_parser('organizations', help='Show organizations')
-
-    # Subcommand: `show devices`
-    parser_show_devices = show_subparsers.add_parser('devices', help='Show devices')
-    parser_show_devices.add_argument('--network', type=str, help='Filter by network ID')
-    parser_show_devices.add_argument('--org-id', help='Org ID', default=os.getenv('MERAKI_ORG_ID'), type=str)
-    parser_show_devices.add_argument('-i', '--input-file', type=str, help='The path to the output JSON file.')
-    parser_show_devices.add_argument('--json', help='Show output in JSON', action='store_true')
-
-    # Subcommand: `show templates`
-    parser_show_templates = show_subparsers.add_parser('templates', help='Show templates')
-    parser_show_templates.add_argument('--org-id', help='Org ID', default=os.getenv('MERAKI_ORG_ID'), type=str)
-
-    # Subcommand: `show me`
-    parser_show_templates = show_subparsers.add_parser('me', help='Show Current User')
-    parser_show_templates.add_argument('--org-id', help='Org ID', default=os.getenv('MERAKI_ORG_ID'), type=str)    
-
-    # Subcommand: `show admins`
-    parser_show_admins = show_subparsers.add_parser('admins', help='Show Current User')
-    parser_show_admins.add_argument('-i', '--input-file', type=str, help='The path to the output JSON file.')
-    parser_show_admins.add_argument('--json', help='Show output in JSON', action='store_true')
-    parser_show_admins.add_argument('--csv', help='Show output in CSV', action='store_true')
-    parser_show_admins.add_argument('-o', '--output_file', type=str, help='The path to the output file.')
-
-    #
-    # Subparser for `import` command
+    # Subparser for `import`
     #
     parser_import = subparsers.add_parser("import", help='Import from Export File')
     parser_import.set_defaults(func=import_command)
@@ -1685,6 +1741,52 @@ def parse_app_args(arguments=None):
     parser_import_templates.add_argument('--diff', help='Print Diff', action='store_true')
     parser_import_templates.add_argument('--always-write', help='Ignore diff and always write to api', action='store_true')
 
+    #
+    # Subparser for `show` command
+    #
+    parser_show = subparsers.add_parser('show', help='Show resources')
+    parser_show.add_argument('--json', help='Show output in JSON', action='store_true')
+    parser_show.set_defaults(func=show_command)
+    show_subparsers = parser_show.add_subparsers(dest='show_command', help='Resources to show')
+
+    # Subcommand: `show networks`
+    parser_show_networks = show_subparsers.add_parser('networks', help='Show networks')
+    parser_show_networks.add_argument('--org-id', help='Org ID', default=os.getenv('MERAKI_ORG_ID'), type=str)
+    parser_show_networks.add_argument('--tags', nargs='+', help='Filter by tags')
+    parser_show_networks.add_argument('--json', help='Show output in JSON', action='store_true')
+    parser_show_networks.add_argument('-i', '--input-file', type=str, help='The path to the output JSON file.')
+
+    # Subcommand: `show organizations`
+    parser_show_organizations = show_subparsers.add_parser('organizations', help='Show organizations')
+
+    # Subcommand: `show devices`
+    parser_show_devices = show_subparsers.add_parser('devices', help='Show devices')
+    parser_show_devices.add_argument('--network', type=str, help='Filter by network ID')
+    parser_show_devices.add_argument('--org-id', help='Org ID', default=os.getenv('MERAKI_ORG_ID'), type=str)
+    parser_show_devices.add_argument('-i', '--input-file', type=str, help='The path to the output JSON file.')
+    parser_show_devices.add_argument('--json', help='Show output in JSON', action='store_true')
+
+    # Subcommand: `show inventory`
+    parser_show_devices = show_subparsers.add_parser('inventory', help='Show inventory')
+    parser_show_devices.add_argument('--org-id', help='Org ID', default=os.getenv('MERAKI_ORG_ID'), type=str)
+    parser_show_devices.add_argument('-i', '--input-file', type=str, help='The path to the output JSON file.')
+    parser_show_devices.add_argument('--json', help='Show output in JSON', action='store_true')
+
+    # Subcommand: `show templates`
+    parser_show_templates = show_subparsers.add_parser('templates', help='Show templates')
+    parser_show_templates.add_argument('--org-id', help='Org ID', default=os.getenv('MERAKI_ORG_ID'), type=str)
+
+    # Subcommand: `show me`
+    parser_show_templates = show_subparsers.add_parser('me', help='Show Current User')
+    parser_show_templates.add_argument('--org-id', help='Org ID', default=os.getenv('MERAKI_ORG_ID'), type=str)    
+
+    # Subcommand: `show admins`
+    parser_show_admins = show_subparsers.add_parser('admins', help='Show Current User')
+    parser_show_admins.add_argument('-i', '--input-file', type=str, help='The path to the output JSON file.')
+    parser_show_admins.add_argument('--json', help='Show output in JSON', action='store_true')
+    parser_show_admins.add_argument('--csv', help='Show output in CSV', action='store_true')
+    parser_show_admins.add_argument('-o', '--output_file', type=str, help='The path to the output file.')
+
 
     parser_import.add_argument('--source-network-id', help='Source Netork ID', type=str)
     parser_import.add_argument('--source-org-id', help='Source Org ID', type=str)
@@ -1702,6 +1804,15 @@ def parse_app_args(arguments=None):
     parser_unclaim_group.add_argument('--networks', nargs='+', help='Source Netorks')
     parser_unclaim_group.add_argument('--serials', nargs='+', help='The serial numbers to import.')
     #
+    # Subparser for `release` command
+    #
+    parser_release = subparsers.add_parser('release', help='Release Devices')
+    parser_release.set_defaults(func=release_command)
+    parser_release.add_argument('-i', '--input-file', type=str, help='The path to the output JSON file.')
+    parser_release.add_argument('--dry-run', help='Do name make a change', action='store_true')
+    parser_release.add_argument('--serials', nargs='+', help='The serial numbers to import.')
+    parser_release.add_argument('--batch-size', help='Batch Size', default=50, type=int)
+    #
     # Subparser for `claim` command
     #
     parser_claim = subparsers.add_parser("claim", help='Claim Devices')
@@ -1712,7 +1823,10 @@ def parse_app_args(arguments=None):
     parser_claim.add_argument('--network', help='Target Network Name', type=str)
     parser_claim.add_argument('--source-network-id', help='Source Network ID', type=str)
     parser_claim.add_argument('--source-network-name', help='Source Network Name', type=str)    
-    parser_claim.add_argument('--serials', nargs='+', help='The serial numbers to import.')   
+    parser_claim.add_argument('--serials', nargs='+', help='The serial numbers to import.')
+    parser_claim.add_argument('--inventory', help='Clain into inventory', action='store_true')
+    parser_claim.add_argument('--batch-size', help='Batch Size', default=50, type=int)
+
 
     return parser.parse_args(arguments)    
 
