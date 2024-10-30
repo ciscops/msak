@@ -1,4 +1,4 @@
-# Meraki Data Tool
+# Meraki Swiss Army Knife
 
 A tool that show, exports, and manipulates data in the Meraki Dashboard API
 ```
