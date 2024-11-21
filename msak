@@ -20,6 +20,7 @@ import jsonschema
 from jsonschema import validate
 from aiohttp.client_exceptions import ClientError
 import pandas as pd
+import meraki
 
 CONFIG_FILES = ['/etc/meraki/meraki_inventory.yml', '/etc/ansible/meraki_inventory.yml']
 OPENAPI_SPEC_FILE = 'meraki-openapi-spec.json'
@@ -667,6 +668,18 @@ def print_tabular_data(data, columns_to_display, sort_by=None, ascending=True):
     # Print the formatted table
     print('\n'.join(formatted_rows))
 
+def print_csv_data(data, columns, sort_by=None, ascending=True):
+    # Convert the list of dicts to a DataFrame
+    df = pd.DataFrame(data, columns=columns)
+
+    # Alternatively, you can save the CSV to a file
+    if args.output_file:
+        output_file = args.output_file
+        df.to_csv(output_file, index=False)
+    else:
+        print(df.to_csv(index=False))
+          
+
 
 async def export_command(args):
     #
@@ -914,6 +927,12 @@ def export_file(filename, contents):
 
 def show_command(args):
     parameters = []
+
+    # For the show commands, we are going to use the meraki python library to get the data
+    # because it makes it a bit easeier and we do not have to worry about the API paths
+    # not being there.
+    dashboard = meraki.DashboardAPI(api_key=args.api_key, base_url=args.base_url)
+
     if hasattr(args, 'tags') and args.tags:
         for tag in args.tags: 
             parameters.append(f"tags[]={tag}")
@@ -956,9 +975,14 @@ def show_command(args):
                     devices.append(device)
 
         else:
-            devices = meraki_read_path("/organizations/{organizationId}/devices", args.api_key, args.base_url, organizationId=args.org_id)
-            networks = meraki_read_path("/organizations/{organizationId}/networks", args.api_key, args.base_url, organizationId=args.org_id)
+            # devices = meraki_read_path("/organizations/{organizationId}/devices", args.api_key, args.base_url, organizationId=args.org_id)
+            devices = dashboard.organizations.getOrganizationDevices(args.org_id, total_pages='all')
+            # networks = meraki_read_path("/organizations/{organizationId}/networks", args.api_key, args.base_url, organizationId=args.org_id)
+            networks = dashboard.organizations.getOrganizationNetworks(args.org_id, total_pages='all')
             networks_by_id = {network['id']: network for network in networks}
+            # Get the devices status
+            devices_statuses = dashboard.organizations.getOrganizationDevicesStatuses(args.org_id, total_pages='all')
+            devices_statuses_by_serial = {device_status['serial']: device_status for device_status in devices_statuses}
             #
             # Convert Network ID to Network Name
             #
@@ -967,10 +991,27 @@ def show_command(args):
                     device["network"] = networks_by_id[device["networkId"]]["name"]
                 else:
                     device["network"] = device["networkId"]
+                if device["serial"] in devices_statuses_by_serial:
+                    device["status"] = devices_statuses_by_serial[device["serial"]]["status"]
+                else:
+                    device["status"] = "Unknown"
+            # Get the devices from the inentory if rquested and specify their network as "None"
+            if (args.all):
+                inventory = dashboard.organizations.getOrganizationInventoryDevices(args.org_id, total_pages='all')
+                for device in inventory:
+                    device["network"] = "None"
+                    devices.append(device)
+                    if device["serial"] in devices_statuses_by_serial:
+                        device["status"] = devices_statuses_by_serial[device["serial"]]["status"]
+                    else:
+                        device["status"] = "Inventory"
+
         if args.json:
             pprint.pp(devices)
+        elif args.csv:
+            print_csv_data(devices, ['name', 'serial', 'mac', 'model', 'status', 'network', 'tags'], sort_by='network')
         else:
-            print_tabular_data(devices, ['name', 'serial', 'mac', 'model', 'network', 'tags'], sort_by='network')
+            print_tabular_data(devices, ['name', 'serial', 'mac', 'model', 'status', 'network', 'tags'], sort_by='network')
     elif args.show_command == 'inventory':
         # If a data file is provided, use that data instead of making an API call
         if args.input_file:
@@ -978,7 +1019,8 @@ def show_command(args):
             source_org_id = next(iter(import_data["organizations"]))
             inventory = import_data["organizations"][source_org_id]["paths"]["/inventory/devices"]
         else:
-            inventory = meraki_read_path("/organizations/{organizationId}/inventory/devices", args.api_key, args.base_url, organizationId=args.org_id)
+            inventory = dashboard.organizations.getOrganizationInventoryDevices(args.org_id, total_pages='all')
+            # inventory = meraki_read_path("/organizations/{organizationId}/inventory/devices", args.api_key, args.base_url, organizationId=args.org_id)
         if args.json:
             pprint.pp(inventory)
         else:
@@ -1566,6 +1608,24 @@ def release_command(args):
     else:
         event_handler("warning", "No devices to release.")
 
+def create_command(args):
+    # For the show commands, we are going to use the meraki python library to get the data
+    # because it makes it a bit easeier and we do not have to worry about the API paths
+    # not being there.
+    dashboard = meraki.DashboardAPI(api_key=args.api_key, base_url=args.base_url)
+
+    if args.create_command == 'networks':
+        try:
+            response = dashboard.organizations.createOrganizationNetwork(
+                args.org_id, args.name, args.product_types,
+                tags=args.tags
+                # timeZone='America/Los_Angeles', 
+                # copyFromNetworkId='N_24329156', 
+                # notes='Additional description of the network'
+            )
+        except meraki.exceptions.APIError as err:
+            event_handler("error", err.message['errors'])
+
 def prompt_user(message, options):
     """
     Prompt the user with a message and a list of options.
@@ -1765,6 +1825,9 @@ def parse_app_args(arguments=None):
     parser_show_devices.add_argument('--org-id', help='Org ID', default=os.getenv('MERAKI_ORG_ID'), type=str)
     parser_show_devices.add_argument('-i', '--input-file', type=str, help='The path to the output JSON file.')
     parser_show_devices.add_argument('--json', help='Show output in JSON', action='store_true')
+    parser_show_devices.add_argument('--all', help='Show devices in inventory', action='store_true')
+    parser_show_devices.add_argument('--csv', help='Show output in CSV', action='store_true')
+    parser_show_devices.add_argument('-o', '--output-file', type=str, help='The path to the output file.')
 
     # Subcommand: `show inventory`
     parser_show_devices = show_subparsers.add_parser('inventory', help='Show inventory')
@@ -1790,6 +1853,20 @@ def parse_app_args(arguments=None):
 
     parser_import.add_argument('--source-network-id', help='Source Netork ID', type=str)
     parser_import.add_argument('--source-org-id', help='Source Org ID', type=str)
+
+    #
+    # Subparser for `create` command
+    #
+    parser_create = subparsers.add_parser('create', help='Create Resources')
+    parser_create.set_defaults(func=create_command)
+    create_subparsers = parser_create.add_subparsers(dest='create_command', help='Create Resources')
+
+    # Subcommand: `create networks`
+    parser_create_newtorks = create_subparsers.add_parser('networks', help='Create Networks')
+    parser_create_newtorks.add_argument('--org-id', help='Org ID', default=os.getenv('MERAKI_ORG_ID'), type=str)
+    parser_create_newtorks.add_argument('--name', help='Network Name', required=True, type=str)
+    parser_create_newtorks.add_argument('--product-types', nargs='+', default=['appliance', 'switch', 'wireless'], help="Product Types")
+    parser_create_newtorks.add_argument('--tags', nargs='+', default=[], help="Tags")
 
 
     #
@@ -1853,7 +1930,10 @@ if __name__ == "__main__":
     setup_logger(log_level)
     logger = logging.getLogger()
 
-    config = import_file(os.path.dirname(os.path.realpath(__file__)) + '/mdt.yaml')
+    config_file = os.path.dirname(os.path.realpath(__file__)) + '/msak.yaml'
+    if os.path.exists(config_file):
+        config = import_file(config_file)
+    
     openapi_spec = import_file(args.spec_file)
     logger.debug(args)
 
