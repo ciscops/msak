@@ -103,8 +103,8 @@ options:
 
 Show Current Credentials:
 ```
-(venv-mdt)% ./msak show me
-INFO: Reading /Users/stevenca/Workspace/mdt/mdt.yaml...
+(venv-msak)% ./msak show me
+INFO: Reading /Users/stevenca/Workspace/msak/msak.yaml...
 INFO: Reading meraki-openapi-spec.json...
 Name:            Steven Carter
 Email:           stevenca@cisco.com
@@ -114,7 +114,7 @@ MERAKI_BASE_URL: https://api.gov-meraki.com/api/v1
 
 Show Organiztions:
 ```
-(venv-mdt)% ./msak show organizations
+(venv-msak)% ./msak show organizations
 id                   name                             
 XXXXXXXXXXXXXXXXXXX  Org X
 YYYYYYYYYYYYYYYYYYY  Org Y      
@@ -123,7 +123,7 @@ ZZZZZZZZZZZZZZZZZZZ  Org Z
 
 Show Networks:
 ```
-(venv-mdt)% ./msak show networks       
+(venv-msak)% ./msak show networks       
 
 id                    name                 productTypes                                                                                      timeZone             tags                                                 
 L_AAAAAAAAAAAAAAAAAA  Network A              ['appliance', 'camera', 'cellularGateway', 'switch']                                              America/New_York     ['discover-clients']                                 
@@ -135,46 +135,46 @@ L_BBBBBBBBBBBBBBBBBB  Network B          ['appliance']                          
 
 Export entire Organization:
 ```
-(venv-mdt)% ./msak export
+(venv-msak)% ./msak export
 ```
 
 Export specfic network and the assocated templates:
 ```
-(venv-mdt)% ./msak export --networks NetworkA NetworkB NetworkC -o <output file>.json
+(venv-msak)% ./msak export --networks NetworkA NetworkB NetworkC -o <output file>.json
 ```
 
 ### Import
 
 Import Templates:
 ```
-(venv-mdt)% ./msak import templates -i <export file>.json
+(venv-msak)% ./msak import templates -i <export file>.json
 ```
 
 Import Networks:
 ```
-(venv-mdt)% ./msak import networks --networks NetworkB -i <export file>.json --diff
+(venv-msak)% ./msak import networks --networks NetworkB -i <export file>.json --diff
 ```
 
 Import Devices:
 ```
-(venv-mdt)% ./msak import devices -i <export file>.json --source-networks NetworkB --diff
+(venv-msak)% ./msak import devices -i <export file>.json --source-networks NetworkB --diff
 ```
 
 ### Unclaim
 
 Unclaim devices by serial number
 ```
-(venv-mdt)% ./msak unclaim --serials AAAA-BBBB-CCCC DDDD-EEEE-FFFF-GGGG
+(venv-msak)% ./msak unclaim --serials AAAA-BBBB-CCCC DDDD-EEEE-FFFF-GGGG
 ```
 
 Unclaim all devices in an export file from a specific network:
 ```
-(venv-mdt)% ./msak unclaim -i <export file>.json --source-network-ids NetworkC
+(venv-msak)% ./msak unclaim -i <export file>.json --source-network-ids NetworkC
 ```
 
 Unclaim all devices in current org for specific network name:
 ```
-(venv-mdt)% ./msak unclaim --networks NetworkA NetworkB
+(venv-msak)% ./msak unclaim --networks NetworkA NetworkB
 ```
 
 ### Claim
@@ -182,7 +182,7 @@ Unclaim all devices in current org for specific network name:
 Claim all devices in an export file into
 the current organization into network of the same name.
 ```
-(venv-mdt)% ./msak claim -i <export file>.json --network NetworkA
+(venv-msak)% ./msak claim -i <export file>.json --network NetworkA
 ```
 
 ## TODO
