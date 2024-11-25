@@ -6,19 +6,54 @@ A tool that shows, imports/exports, and manipulates data in the Meraki Dashboard
 
 **No refunds!  No returns!**
 
-## Installation
+## Quick Start
+
+Clone the repo:
+
+```
+https://github.com/ciscops/msak.git
+cd msak
+```
+
+Create the Python virtual environment and install prerequisites:
 
 ```
 python3 -venv venv-msak
 . ./venv-msak/bin/activate
-pip3 install -r requirements
+pip3 install -r requirements.txt
+```
+
+Set minimum environment variables:
+
+```
+export MERAKI_DASHBOARD_API_KEY='XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX'
+```
+
+Run msak to show current user:
+
+```
+./msak show me
+Name:            Steven Carter
+Email:           stevenca@cisco.com
+MERAKI_ORG_ID:   None (Unknown)
+MERAKI_BASE_URL: https://api.meraki.com/api/v1
+```
+
+Get a list of the available organizations accessible with this API Key:
+
+```
+./msak show organizations
+id                  name                       
+123456789012345678  Steven Carter              
+111111111111111111  Organization #1
+222222222222222222  Organization #2                      
 ```
 
 ## Environment Variable
 
 MSAK requires information to work.  In particular, the following should be set:
 
-* Meraki API Base URL: Set either by specifying `--base-url` or setting the environment variable `MERAKI_DASHBOARD_API_KEY`
+* Meraki API Base URL: Set either by specifying `--base-url` or setting the environment variable `MERAKI_DASHBOARD_API_KEY` (Defaults to https://api.meraki.com/api/v1)
 * Meraki Dashboard API Key: Set either by specifying `--api-key` or setting the environment variable `MERAKI_BASE_URL`
 * Meraki Organization ID: Set either by specifying `--org-id` or setting the environment variable `MERAKI_ORG_ID`
 

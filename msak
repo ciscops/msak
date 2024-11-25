@@ -22,6 +22,7 @@ from aiohttp.client_exceptions import ClientError
 import pandas as pd
 import meraki
 
+DEFAULT_MERAKI_BASE_URL = 'https://api.meraki.com/api/v1'
 CONFIG_FILES = ['/etc/meraki/meraki_inventory.yml', '/etc/ansible/meraki_inventory.yml']
 OPENAPI_SPEC_FILE = 'meraki-openapi-spec.json'
 API_MAX_RETRIES             = 3
@@ -455,7 +456,6 @@ def meraki_read_path(path, api_key, base_url, **kwargs) -> dict | None:
         event_handler("debug", f"{path} is write-only")
         return None
     return meraki_request(url, api_key, responses=responses, **kwargs)
-
 
 def meraki_write_path(path, api_key, base_url, raw_payload, api_handler=False, **kwargs) -> dict | None:
     change_needed = True
@@ -952,7 +952,7 @@ def show_command(args):
         else:
             print_tabular_data(networks, ['name', 'id', 'productTypes', 'timeZone', 'tags'], sort_by='name')      
     elif args.show_command == 'organizations':
-        organizations = meraki_read_path("/organizations", args.api_key, args.base_url)
+        organizations = dashboard.organizations.getOrganizations()
         if args.json:
             pprint.pp(organizations)
         else:
@@ -1725,7 +1725,7 @@ def setup_logger(level):
 def parse_app_args(arguments=None):
     # Create a top-level parser
     parser = argparse.ArgumentParser(description="Meraki Data Tool")
-    parser.add_argument('-b', '--base-url', type=str, default=os.getenv('MERAKI_BASE_URL'), help='The base URL for the API.')
+    parser.add_argument('-b', '--base-url', type=str, default=os.getenv('MERAKI_BASE_URL', DEFAULT_MERAKI_BASE_URL), help='The base URL for the API.')
     parser.add_argument('-k', '--api-key', type=str, default=os.getenv('MERAKI_DASHBOARD_API_KEY'), help='The Meraki Organization ID.')
     parser.add_argument('-O', '--org-id', type=str, default=os.getenv('MERAKI_ORG_ID'), help='The organization ID to replace in the paths.')
     parser.add_argument('-c', '--max-concurrent-requests', type=int, default=5, help='The maximum number of concurrent requests allowed.')
