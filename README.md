@@ -11,7 +11,7 @@ A tool that shows, imports/exports, and manipulates data in the Meraki Dashboard
 Clone the repo:
 
 ```
-https://github.com/ciscops/msak.git
+git clone https://github.com/ciscops/msak.git
 cd msak
 ```
 
