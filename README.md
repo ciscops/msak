@@ -26,7 +26,13 @@ pip3 install -r requirements.txt
 Set minimum environment variables:
 
 ```
-export MERAKI_DASHBOARD_API_KEY='XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX'
+export MERAKI_DASHBOARD_API_KEY=XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+```
+
+> Note: For Meraki For Government, set the URL to the correct endpoint:
+
+```
+export MERAKI_BASE_URL='https://api.gov-meraki.com/api/v1'
 ```
 
 Run msak to show current user:
