@@ -931,7 +931,7 @@ def show_command(args):
     # For the show commands, we are going to use the meraki python library to get the data
     # because it makes it a bit easeier and we do not have to worry about the API paths
     # not being there.
-    dashboard = meraki.DashboardAPI(api_key=args.api_key, base_url=args.base_url)
+    dashboard = meraki.DashboardAPI(api_key=args.api_key, base_url=args.base_url, inherit_logging_config=True, output_log=False)
 
     if hasattr(args, 'tags') and args.tags:
         for tag in args.tags: 
@@ -975,8 +975,11 @@ def show_command(args):
                     devices.append(device)
 
         else:
+            kwargs = {}
+            if args.serial:
+                kwargs["serial"] = args.serial
             # devices = meraki_read_path("/organizations/{organizationId}/devices", args.api_key, args.base_url, organizationId=args.org_id)
-            devices = dashboard.organizations.getOrganizationDevices(args.org_id, total_pages='all')
+            devices = dashboard.organizations.getOrganizationDevices(args.org_id, total_pages='all', **kwargs)
             # networks = meraki_read_path("/organizations/{organizationId}/networks", args.api_key, args.base_url, organizationId=args.org_id)
             networks = dashboard.organizations.getOrganizationNetworks(args.org_id, total_pages='all')
             networks_by_id = {network['id']: network for network in networks}
@@ -995,16 +998,6 @@ def show_command(args):
                     device["status"] = devices_statuses_by_serial[device["serial"]]["status"]
                 else:
                     device["status"] = "Unknown"
-            # Get the devices from the inentory if rquested and specify their network as "None"
-            if (args.all):
-                inventory = dashboard.organizations.getOrganizationInventoryDevices(args.org_id, total_pages='all')
-                for device in inventory:
-                    device["network"] = "None"
-                    devices.append(device)
-                    if device["serial"] in devices_statuses_by_serial:
-                        device["status"] = devices_statuses_by_serial[device["serial"]]["status"]
-                    else:
-                        device["status"] = "Inventory"
 
         if args.json:
             pprint.pp(devices)
@@ -1019,12 +1012,35 @@ def show_command(args):
             source_org_id = next(iter(import_data["organizations"]))
             inventory = import_data["organizations"][source_org_id]["paths"]["/inventory/devices"]
         else:
-            inventory = dashboard.organizations.getOrganizationInventoryDevices(args.org_id, total_pages='all')
+            kwargs = {}
+            if args.serials:
+                kwargs["serials"] = args.serials
+            devices = dashboard.organizations.getOrganizationInventoryDevices(args.org_id, total_pages='all', **kwargs)
             # inventory = meraki_read_path("/organizations/{organizationId}/inventory/devices", args.api_key, args.base_url, organizationId=args.org_id)
-        if args.json:
-            pprint.pp(inventory)
-        else:
-            print_tabular_data(inventory, ['name', 'serial', 'mac', 'model', 'tags'], sort_by='model')
+            networks = dashboard.organizations.getOrganizationNetworks(args.org_id, total_pages='all')
+            networks_by_id = {network['id']: network for network in networks}
+            # Get the devices status
+            devices_statuses = dashboard.organizations.getOrganizationDevicesStatuses(args.org_id, total_pages='all')
+            devices_statuses_by_serial = {device_status['serial']: device_status for device_status in devices_statuses}
+            #
+            # Convert Network ID to Network Name
+            #
+            for device in devices:
+                if device["networkId"] in networks_by_id:
+                    device["network"] = networks_by_id[device["networkId"]]["name"]
+                else:
+                    device["network"] = device["networkId"]
+                if device["serial"] in devices_statuses_by_serial:
+                    device["status"] = devices_statuses_by_serial[device["serial"]]["status"]
+                else:
+                    device["status"] = "Inventory"
+        if devices:
+            if args.json:
+                pprint.pp(devices)
+            elif args.csv:
+                print_csv_data(devices, ['name', 'serial', 'mac', 'model', 'status', 'network', 'tags'], sort_by='network')
+            else:
+                print_tabular_data(devices, ['name', 'serial', 'mac', 'model', 'status', 'network', 'tags'], sort_by='network')
     elif args.show_command == 'templates':
         templates = meraki_read_path("/organizations/{organizationId}/configTemplates", args.api_key, args.base_url, organizationId=args.org_id)
         if args.json:
@@ -1569,42 +1585,153 @@ def batch_iterator(lst, batch_size):
     for i in range(0, len(lst), batch_size):
         yield lst[i:i + batch_size]
 
+def remove_command(args):
+    remove_list = []
+    import_data = {}
+
+    dashboard = meraki.DashboardAPI(api_key=args.api_key, base_url=args.base_url, simulate=args.dry_run)
+
+    # First we need to figure out where to get the data that we need, either
+    # an input file or the API
+    if args.input_file:
+        # If an input file is provided, we get the list of devices from the file
+        import_data = import_file(args.input_file)
+        src_org_id = next(iter(import_data["organizations"]))
+        network_list = import_data["organizations"][src_org_id]["paths"]["/networks"]
+        device_by_serial = import_data["devices"]
+    else:
+        # Otherwise we get the list of networks from the API
+        # network_list = meraki_read_path("/organizations/{organizationId}/networks", args.api_key, args.base_url, organizationId=args.org_id)
+        network_list = dashboard.organizations.getOrganizationNetworks(args.org_id, total_pages='all')
+
+    # Then, check to see if networks are provided.  If the names are provided, we need to get their networkIds
+    network_id_list = []
+    if args.network_ids:
+        network_id_list = args.networks
+    elif args.networks:
+        # Create a dict of networks by name
+        networks_by_name = {network['name']: network for network in network_list}
+        # Find matches and retrieve their networkId
+        network_id_list = []
+        for network_name in args.networks:
+            for key in networks_by_name.keys():
+                if network_name in key:
+                    network_id = networks_by_name[key].get('id')
+                    network_id_list.append(network_id)
+
+    if network_id_list:
+        event_handler("debug", f"Unclaiming devices from networks {network_id_list}")
+        # If we have a list of network IDs, we need to find the devices in those networks to unclaim
+        if args.input_file:
+            # An input file was provided, so we need to get the devices from the file
+            for serial, data in device_by_serial.items():
+                device_data = data["paths"]["/"]
+                if device_data["networkId"] in network_id_list:
+                    remove_list.append({"serial": serial, "networkId": device_data["networkId"]})
+        else:
+            # An input file was not provided, so we need to get the devices from the API
+            parameters = []
+            # Build the paramater list to limit the devices to the networks provided
+            for network_id in network_id_list:
+                parameters.append(f"networkIds[]={network_id}")
+            # If we have networkIds provided by the user, find the devices in those networks
+            device_list = meraki_read_path("/organizations/{organizationId}/devices", args.api_key, args.base_url, organizationId=args.org_id, parameters=parameters)
+            if device_list:
+                for device in device_list:
+                    remove_list.append({"serial": device["serial"], "networkId": device["networkId"]})
+
+    elif args.serials:
+        kwargs = {}
+        kwargs["serials"] = args.serials
+        # If we were given a list of serial numbers, we need to figure out what network they are in
+        if not import_data:
+            inventory = dashboard.organizations.getOrganizationInventoryDevices(args.org_id, total_pages='all', **kwargs)
+            # device_list = meraki_read_path("/organizations/{organizationId}/devices", args.api_key, args.base_url, organizationId=args.org_id)
+            remove_list = inventory
+        else:
+            devices_by_serial = {device['serial']: device for device in device_list}
+            for serial in args.serials:
+                if serial in devices_by_serial:
+                    remove_list.append({"serial": serial, "networkId": devices_by_serial[serial]["networkId"]})
+
+    elif args.input_file:
+        # If the network_id_list is empty, we need to get all devices in the input file
+        for serial, data in device_by_serial.items():
+            device_data = data["paths"]["/"]
+            remove_list.append({"serial": serial, "networkId": device_data["networkId"]})
+
+    if remove_list:
+        print (remove_list)
+        answer = prompt_user(f"Remove these devices from their networks?", ["Yes", "No"])
+        if answer == "Yes":
+            for item in remove_list:
+                if args.reboot:
+                    event_handler("info", f"Rebooting {item['serial']}.")
+                    response = dashboard.devices.rebootDevice(item['serial'])
+                    event_handler("debug", response)
+                # payload = {}
+                # meraki_write_path("/devices/{serial}/reboot", args.api_key, args.base_url, payload, serial=item['serial'])
+                # payload = {
+                #     "serial": item['serial']
+                # }
+                event_handler("info", f"Removing {item['serial']} from network {item['networkId']}")
+                response = dashboard.networks.removeNetworkDevices(item['networkId'], item['serial'])
+                event_handler("debug", response)
+                # meraki_write_path("/networks/{networkId}/devices/remove", args.api_key, args.base_url, payload, networkId=item['networkId'])    
+            # serials_list = [item["serial"] for item in unclaim_list]
+            # payload = {
+            #     "serials": serials_list
+            # }
+            # event_handler("debug", f"Unclaiming {serials_list} in org {args.org_id}")
+            # meraki_write_path("/organizations/{organizationId}/inventory/release", args.api_key, args.base_url, payload, organizationId=args.org_id)
+    else:
+        event_handler("warning", "No devices to remove.")
+
 def release_command(args):
     release_list = []
+
+    dashboard = meraki.DashboardAPI(api_key=args.api_key, base_url=args.base_url, simulate=args.dry_run)
 
     # If a data file is provided, use that data instead of making an API call
     if args.input_file:
         import_data = import_file(args.input_file)
         source_org_id = next(iter(import_data["organizations"]))
         inventory = import_data["organizations"][source_org_id]["paths"]["/inventory/devices"]
-    else:
-        inventory = meraki_read_path("/organizations/{organizationId}/inventory/devices", args.api_key, args.base_url, organizationId=args.org_id)
-
-    inventory_serials = [item["serial"] for item in inventory]
-
-    if args.serials:
-        # If we were given a list of serial numbers, we need to make sure they are in the inventory
-        for serial in args.serials:
-            if serial in inventory_serials:
-                release_list.append(serial)
+        if args.serials:
+            # If we were given a list of serial numbers, we need to make sure they are in the inventory
+            for serial in args.serials:
+                if serial in inventory_serials:
+                    release_list.append(serial)
+                else:
+                    event_handler("error", f"Serial {serial} not found in inventory.")
             else:
-                event_handler("error", f"Serial {serial} not found in inventory.")
-    elif args.input_file:
-        release_list = inventory_serials
+                release_list = [item["serial"] for item in inventory]
     else:
-        event_handler("critical", "Input file or serials argument must be provided.")
+        kwargs = {}
+        if args.serials:
+            kwargs["serials"] = args.serials
+            # inventory = meraki_read_path("/organizations/{organizationId}/inventory/devices", args.api_key, args.base_url, organizationId=args.org_id)
+            inventory = dashboard.organizations.getOrganizationInventoryDevices(args.org_id, total_pages='all', **kwargs)
+            release_list = [item["serial"] for item in inventory]
+        else:
+            event_handler("critical", "Input file or serials argument must be provided.")
 
     if release_list:
         print (release_list)
         answer = prompt_user(f"Release these devices from inventory?", ["Yes", "No"])
         if answer == "Yes":
-            # Process the list in batches of 50
-            for batch in batch_iterator(release_list, args.batch_size):
-                payload = {
-                    "serials": batch
-                }
-                event_handler("info", f"Releasing: {batch}")
-                meraki_write_path("/organizations/{organizationId}/inventory/release", args.api_key, args.base_url, payload, organizationId=args.org_id)    
+            response = dashboard.organizations.releaseFromOrganizationInventory(
+                args.org_id, 
+                serials=release_list
+            )
+            event_handler("debug", response)
+            # # Process the list in batches of 50
+            # for batch in batch_iterator(release_list, args.batch_size):
+            #     payload = {
+            #         "serials": batch
+            #     }
+            #     event_handler("info", f"Releasing: {batch}")
+            #     meraki_write_path("/organizations/{organizationId}/inventory/release", args.api_key, args.base_url, payload, organizationId=args.org_id)    
     else:
         event_handler("warning", "No devices to release.")
 
@@ -1822,18 +1949,21 @@ def parse_app_args(arguments=None):
     # Subcommand: `show devices`
     parser_show_devices = show_subparsers.add_parser('devices', help='Show devices')
     parser_show_devices.add_argument('--network', type=str, help='Filter by network ID')
+    parser_show_devices.add_argument('--serial', type=str, help='Filter by Serial')
     parser_show_devices.add_argument('--org-id', help='Org ID', default=os.getenv('MERAKI_ORG_ID'), type=str)
     parser_show_devices.add_argument('-i', '--input-file', type=str, help='The path to the output JSON file.')
     parser_show_devices.add_argument('--json', help='Show output in JSON', action='store_true')
-    parser_show_devices.add_argument('--all', help='Show devices in inventory', action='store_true')
     parser_show_devices.add_argument('--csv', help='Show output in CSV', action='store_true')
-    parser_show_devices.add_argument('-o', '--output-file', type=str, help='The path to the output file.')
+    parser_show_devices.add_argument('-o', '--output-file', type=str, default='devices.csv', help='The path to the output file.')
 
     # Subcommand: `show inventory`
-    parser_show_devices = show_subparsers.add_parser('inventory', help='Show inventory')
-    parser_show_devices.add_argument('--org-id', help='Org ID', default=os.getenv('MERAKI_ORG_ID'), type=str)
-    parser_show_devices.add_argument('-i', '--input-file', type=str, help='The path to the output JSON file.')
-    parser_show_devices.add_argument('--json', help='Show output in JSON', action='store_true')
+    parser_show_inventory = show_subparsers.add_parser('inventory', help='Show inventory')
+    parser_show_inventory.add_argument('--org-id', help='Org ID', default=os.getenv('MERAKI_ORG_ID'), type=str)
+    parser_show_inventory.add_argument('--serials', nargs='+', help='Filter by Serials.')
+    parser_show_inventory.add_argument('-i', '--input-file', type=str, help='The path to the output JSON file.')
+    parser_show_inventory.add_argument('--json', help='Show output in JSON', action='store_true')
+    parser_show_inventory.add_argument('--csv', help='Show output in CSV', action='store_true')
+    parser_show_inventory.add_argument('-o', '--output-file', type=str, default='inventory.csv', help='The path to the output file.')
 
     # Subcommand: `show templates`
     parser_show_templates = show_subparsers.add_parser('templates', help='Show templates')
@@ -1868,6 +1998,27 @@ def parse_app_args(arguments=None):
     parser_create_newtorks.add_argument('--product-types', nargs='+', default=['appliance', 'switch', 'wireless'], help="Product Types")
     parser_create_newtorks.add_argument('--tags', nargs='+', default=[], help="Tags")
 
+    #
+    # Subparser for `release` command
+    #
+    parser_release = subparsers.add_parser('release', help='Release from Inventory')
+    parser_release.set_defaults(func=release_command)
+    parser_release.add_argument('-i', '--input-file', type=str, help='The path to the output JSON file.')
+    parser_release.add_argument('--dry-run', help='Do name make a change', action='store_true')
+    parser_release.add_argument('--serials', nargs='+', help='The serial numbers to unclaim.')
+
+    #
+    # Subparser for `remove` command
+    #
+    parser_remove = subparsers.add_parser('remove', help='Remove Devices')
+    parser_remove.set_defaults(func=remove_command)
+    parser_remove.add_argument('-i', '--input-file', type=str, help='The path to the output JSON file.')
+    parser_remove.add_argument('--dry-run', help='Simulate the Change', action='store_true')
+    parser_remove.add_argument('--reboot', help='Reboot Before Removal', action='store_true')
+    parser_remove_group = parser_remove.add_mutually_exclusive_group()
+    parser_remove_group.add_argument('--network-ids', help='Source Netork IDs', type=str)
+    parser_remove_group.add_argument('--networks', nargs='+', help='Source Netorks')
+    parser_remove_group.add_argument('--serials', nargs='+', help='The serial numbers to unclaim.')
 
     #
     # Subparser for `unclaim` command
@@ -1879,16 +2030,8 @@ def parse_app_args(arguments=None):
     parser_unclaim_group = parser_unclaim.add_mutually_exclusive_group()
     parser_unclaim_group.add_argument('--network-ids', help='Source Netork IDs', type=str)
     parser_unclaim_group.add_argument('--networks', nargs='+', help='Source Netorks')
-    parser_unclaim_group.add_argument('--serials', nargs='+', help='The serial numbers to import.')
-    #
-    # Subparser for `release` command
-    #
-    parser_release = subparsers.add_parser('release', help='Release Devices')
-    parser_release.set_defaults(func=release_command)
-    parser_release.add_argument('-i', '--input-file', type=str, help='The path to the output JSON file.')
-    parser_release.add_argument('--dry-run', help='Do name make a change', action='store_true')
-    parser_release.add_argument('--serials', nargs='+', help='The serial numbers to import.')
-    parser_release.add_argument('--batch-size', help='Batch Size', default=50, type=int)
+    parser_unclaim_group.add_argument('--serials', nargs='+', help='The serial numbers to unclaim.')
+
     #
     # Subparser for `claim` command
     #
