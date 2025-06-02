@@ -31,23 +31,68 @@ API_TRANSMIT_TIMEOUT        = 60
 API_STATUS_RATE_LIMIT       = 429
 API_RETRY_DEFAULT_WAIT      = 3
 
+import_data = {}
+
+EXPECTED_ERROR_PHRASES = [
+    "unsupported",
+    "only supports",
+    "not enabled",
+    "not supported",
+    "does not contain",
+    "does not support"
+]
+
+def expected_error_message(string):
+    if isinstance(string, str):
+        string_lower = string.lower()
+        return any(phrase.lower() in string_lower for phrase in EXPECTED_ERROR_PHRASES)
+    return False
+
 PRODUCT_TYPES = [
         'appliance',
         'switch',
         'wireless',
+        'statuses',
         'sensor',
         'camera',
-        'cellularGateway'
+        'cellularGateway',
+        'categories'
 ]
 
 PRODUCT_TYPES_MAP = {
     'appliance': ['MX'],
     'wireless': ['MR', 'CW'],
-    'switch': ['MX']
+    'switch': ['MS']
 }
 
+DIFF_IGNORE_KEYS = [
+    'psk',
+    'billing.replyToEmailAddress',
+    'billing.prepaidAccessFastLoginEnabled'
+]
+
+SKIP_TAGS = [
+    # 'monitor',
+    'liveTools',
+    'cableTest',
+    'ping',
+    'apiRequests',
+    'firmware',
+    'upgrades',
+    'packetLoss',
+    'byNetwork',
+    'byDevice',
+    'openapiSpec',
+    'sm',
+    'insight',
+    'monitoredMediaServers',
+    'applicationCategories'
+]
+
 readonly_exceptions = [
-    "/organizations/{organizationId}/inventory/devices"
+    "/organizations/{organizationId}/inventory/devices",
+    "/devices/{serial}/switch/ports",
+    "/networks/{networkId}/appliance/ports"
 ]
 
 index_lookup = {
@@ -61,9 +106,19 @@ index_lookup = {
     "/devices/{serial}/switch/routing/staticRoutes": "staticRouteId",
     "/networks/{networkId}/switch/stacks/{switchStackId}/routing/staticRoutes": "staticRouteId",
     "/devices/{serial}/switch/ports": "portID",
-    "/organizations/{organizationId}/admins": "id" 
+    "/organizations/{organizationId}/admins": "id"
 }
 
+key_lookup_map = {
+    "/organizations/{organizationId}/adaptivePolicy/groups": "groupId",
+    "/networks/{networkId}/appliance/ports": "number"
+}
+
+def key_lookup(path):
+    if path in key_lookup_map:
+        return key_lookup_map[path]
+    else:
+        return None
 
 template_schemas = {
     "/networks/{networkId}/wireless/ssids/{number}": {
@@ -87,143 +142,90 @@ def get_product_type(model):
             return product_type
     return None
 
-def org_admin_handler(path, api_key, base_url, payload, **kwargs):
-    event_handler("info", f"Org Admin Handler: {path}")
-    #
-    # See if we can figure out what this data structure using for its index
-    #
-    if isinstance(payload, list):
-            #
-            # First we need to see what data is there to see if we need to put or post
-            #
-            current_data = meraki_read_path(path, api_key, base_url, **kwargs)
-            current_data_by_name = {item['name']: item for item in current_data}
-            for item in payload:
-                if item["name"] in current_data_by_name:
-                    event_handler("info", f"Updating admin user {item['name']}")
-                    #
-                    # The item exists, so we need to call the api's per-item form
-                    #
-                    item_path = path + '/{' + index_key + '}'
-                    # Use the index_key from the current data instead of the imported data
-                    kwargs["id"] = current_data_by_name[item["name"]]["id"]
-                    result = meraki_write_path(item_path, args.api_key, base_url, item, api_handler=True, **kwargs)
-                else:
-                    event_handler("info", f"Adding admin user {item['name']}")
-                    #
-                    # The item does not exist, so we create it with the same api
-                    #
-                    result = meraki_write_path(path, args.api_key, base_url, item, api_handler=True, **kwargs)
-    else:
-        # Cannot be procssed, return the payload
-        return (payload)
-    return ({})
+# def org_admin_handler(path, api_key, base_url, payload, **kwargs):
+#     event_handler("info", f"Org Admin Handler: {path}")
+#     #
+#     # See if we can figure out what this data structure using for its index
+#     #
+#     if isinstance(payload, list):
+#             #
+#             # First we need to see what data is there to see if we need to put or post
+#             #
+#             current_data = meraki_read_path(path, api_key, base_url, **kwargs)
+#             current_data_by_name = {item['name']: item for item in current_data}
+#             for item in payload:
+#                 if item["name"] in current_data_by_name:
+#                     event_handler("info", f"Updating admin user {item['name']}")
+#                     #
+#                     # The item exists, so we need to call the api's per-item form
+#                     #
+#                     item_path = path + '/{' + source_key + '}'
+#                     # Use the source_key from the current data instead of the imported data
+#                     kwargs["id"] = current_data_by_name[item["name"]]["id"]
+#                     result = meraki_write_path(item_path, args.api_key, base_url, item, api_handler=True, **kwargs)
+#                 else:
+#                     event_handler("info", f"Adding admin user {item['name']}")
+#                     #
+#                     # The item does not exist, so we create it with the same api
+#                     #
+#                     result = meraki_write_path(path, args.api_key, base_url, item, api_handler=True, **kwargs)
+#     else:
+#         # Cannot be procssed, return the payload
+#         return (payload)
+#     return ({})
 
-def default_api_handler(path, api_key, base_url, payload, **kwargs):
-    event_handler("info", f"Default handler: {path}")
-    result = {}
-    index_key = None
-    #
-    # See if we can figure out what this data structure using for its index
-    #
-    if isinstance(payload, list):
-        #
-        # If this is a list, look to see if the index is known
-        #
-        if path in index_lookup:
-            index_key = index_lookup[path]
-        if index_key == None:
-            event_handler("error", f"Unable to process path {path}: Index not found.")
-        else:
-            #
-            # First we need to see what data is there to see if we need to put or post
-            #
-            data = meraki_read_path(path, api_key, base_url, **kwargs)
-            existing_data_map = {}
-            for item in data:
-                if "name" in item:
-                    existing_data_map[item["name"]] = item
-                else:
-                    event_handler("error", f"Unable to process path {path}: Name not found.")
-                    return ({})
-            for item in payload:
-                if "radiusServers" in item:
-                    for server in item["radiusServers"]:
-                        server.pop("serverId", None)
-                        server["secret"] = "ChangeMe"
-                if "radiusAccountingServers" in item:
-                    for server in item["radiusAccountingServers"]:
-                        server.pop("serverId", None)
-                        server["secret"] = "ChangeMe"  
-                if item["name"] in existing_data_map:
-                    #
-                    # The item exists, so we need to call the api's per-item form
-                    #
-                    item_path = path + '/{' + index_key + '}'
-                    # Use the index_key from the current data instead of the imported data
-                    kwargs[index_key] = existing_data_map[item["name"]][index_key]
-                    result = meraki_write_path(item_path, args.api_key, base_url, item, **kwargs)
-                else:
-                    #
-                    # The item does not exist, so we create it with the same api
-                    #
-                    result = meraki_write_path(path, args.api_key, base_url, item, **kwargs)
-    else:
-        # Cannot be procssed, return the payload
-        return (payload)
-    return (result)
+# def noop(path, payload):
+#     event_handler("warning", f"{path} is currently unsupported")
 
-def noop(path, payload):
-    event_handler("warning", f"{path} is currently unsupported")
-
-def wireless_handler(path, api_key, base_url, payload, **kwargs):
+def wireless_handler(path, api_key, base_url, payload, **kwargs) -> dict | None:
     event_handler("info", f"Wireless hander: {path}")
     # if payload["authMode"] == "psk":
     #     payload["psk"] = "ChangeMe"
     if "radiusServers" in payload:
         for server in payload["radiusServers"]:
             server["secret"] = "ChangeMe"
-            if "openRoamingCertificateId" in server and server["openRoamingCertificateId"] == None:
-                server.pop("openRoamingCertificateId")
+            # if "openRoamingCertificateId" in server and server["openRoamingCertificateId"] == None:
+            #     server.pop("openRoamingCertificateId")
     if "radiusAccountingServers" in payload:
         for server in payload["radiusAccountingServers"]:
                 server["secret"] = "ChangeMe"
-    if "splashUrl" in payload and payload["splashUrl"] == None:
-        payload = {}
+    if "splashLogo" in payload and payload["splashLogo"]:
+        # Going to just load without the logo for now.
+        payload.pop("splashLogo")
     return (payload)
 
-def switchport_handler(path, api_key, base_url, payload, **kwargs):
-    event_handler("info", f"Switchport hander: {path}")
-    for item in payload and item["profile"]["enabled"] == True:
-        if "profile" in item:
-            # The API does not allow certain attributes when assocaited with a port profile
-            if args.ignore_profile:
-                item["profile"]["enabled"] = False
-            else:
-                item.pop("tags", None)
-                item.pop("accessPolicyNumber", None)
-                item.pop("accessPolicyType", None)
-                item.pop("allowedVlans", None)
-                item.pop("daiTrusted", None)
-                item.pop("name", None)
-                item.pop("poeEnabled", None)
-                item.pop("rstpEnabled", None)
-                item.pop("stpGuard", None)
-                item.pop("type", None)
-                item.pop("udld", None)
-                item.pop("vlan", None)
-                item.pop("voiceVlan", None)
-                item.pop("isolationEnabled", None)
+# def switchport_handler(path, api_key, base_url, payload, **kwargs):
+#     event_handler("info", f"Switchport hander: {path}")
+#     for item in payload and item["profile"]["enabled"] == True:
+#         if "profile" in item:
+#             # The API does not allow certain attributes when assocaited with a port profile
+#             if args.ignore_profile:
+#                 item["profile"]["enabled"] = False
+#             else:
+#                 item.pop("tags", None)
+#                 item.pop("accessPolicyNumber", None)
+#                 item.pop("accessPolicyType", None)
+#                 item.pop("allowedVlans", None)
+#                 item.pop("daiTrusted", None)
+#                 item.pop("name", None)
+#                 item.pop("poeEnabled", None)
+#                 item.pop("rstpEnabled", None)
+#                 item.pop("stpGuard", None)
+#                 item.pop("type", None)
+#                 item.pop("udld", None)
+#                 item.pop("vlan", None)
+#                 item.pop("voiceVlan", None)
+#                 item.pop("isolationEnabled", None)
 
-        item_path = f"{path}/{item['portId']}"
-        verb, schema, responses = get_schema(path + "/{portId}", "write", **kwargs)
-        kwargs['portId'] = item['portId']
-        kwargs['schema'] = schema
-        kwargs['verb'] = verb
-        result = meraki_write_path(item_path, api_key, base_url, item, **kwargs)
-    return (result)
+#         item_path = f"{path}/{item['portId']}"
+#         verb, schema, responses = get_schema(path + "/{portId}", "write", **kwargs)
+#         kwargs['portId'] = item['portId']
+#         kwargs['schema'] = schema
+#         kwargs['verb'] = verb
+#         result = meraki_write_path(item_path, api_key, base_url, item, **kwargs)
+#     return (result)
 
-def switch_acl_handler(path, api_key, base_url, payload, **kwargs):
+def switch_acl_handler(path, api_key, base_url, payload, **kwargs) -> dict | None:
     event_handler("debug", "Called switch_acl_handler")
     new_payload = {
         "rules": []
@@ -236,12 +238,49 @@ def switch_acl_handler(path, api_key, base_url, payload, **kwargs):
             new_payload["rules"].append(rule)
     return (new_payload)
 
-def l3FirewallRules_handler(path, api_key, base_url, payload, **kwargs):
+def appliance_vlan_handler(path, api_key, base_url, payload, **kwargs) -> dict | None:
+    event_handler("debug", "Called appliace_vlan_handler")
+    if isinstance(payload, dict):
+        new_payload = payload
+        if "is_template" in kwargs and kwargs["is_template"] == True:
+            new_payload.pop("ipv6", None)
+            # event_handler("debug", "Is bound to a template")
+            # ipv6_payload = {
+            #     "enabled": False
+            # }
+            # new_payload['ipv6'] = ipv6_payload
+        # For some reason, the id gets exported as an integer instead of a string.  If we do not
+        # Fix it, it will not pass the schema validation
+        if "id" in new_payload and isinstance(new_payload["id"], int):
+            new_payload["id"] = str(new_payload["id"])
+    else:
+        event_handler("warning", f"Invalid payload (list) for POST with {path}")
+        return (None)
+    return (new_payload)
+
+def l3FirewallRules_handler(path, api_key, base_url, payload, **kwargs) -> dict | None:
     event_handler("debug", "Called switch_acl_handler")
     new_payload = {
         "rules": [],
         "allowLanAccess": True
     }
+    def translate_policy_objects(rule):
+        if 'GRP' in rule or 'OBJ' in rule:
+            parts = rule.split(',')
+            new_parts = []
+            for part in parts:
+                if match := re.search(r'GRP\((\d+)\)', part):
+                    group_id = match.group(1)
+                    if new_group_id := translate_path("/organizations/{organizationId}/policyObjects/groups/" + group_id):
+                        new_parts.append(f"GRP({new_group_id})")
+                elif match := re.search(r'OBJ\((\d+)\)', part):
+                    object_id = match.group(1)
+                    if new_object_id := translate_path("/organizations/{organizationId}/policyObjects/" + object_id):
+                        new_parts.append(f"OBJ({int(new_object_id)})")
+                else:
+                    new_parts.append(part)
+            return ','.join(new_parts)
+        return None
     #
     # Need to remove the default rule
     #
@@ -250,19 +289,126 @@ def l3FirewallRules_handler(path, api_key, base_url, payload, **kwargs):
             if rule["policy"] == "deny":
                 new_payload["allowLanAccess"] = False
         elif rule["comment"] == "Default rule":
+            # Drop the default rule.
             pass
         else:
+            # The rule should be added, but might need to be modified.
+            if new_item := translate_policy_objects(rule["srcCidr"]):
+                rule["srcCidr"] = new_item
+            if new_item := translate_policy_objects(rule["destCidr"]):
+                rule["destCidr"] = new_item
             new_payload["rules"].append(rule)
     return (new_payload)
 
-api_path_handlers = {
-    "/networks/{networkId}/wireless/ssids/{number}": wireless_handler,
+def content_policy_handler(path, api_key, base_url, payload, **kwargs) -> dict | None:
+    event_handler("debug", f"Called content_policy_handler on path {path}")
+    if "blockedUrlCategories" in payload:
+        converted_categories = []
+        for category in payload["blockedUrlCategories"]:
+            converted_categories.append(category["id"])
+        payload["blockedUrlCategories"] = converted_categories
+    return(payload)
+        
+def policy_object_handler(path, api_key, base_url, payload, **kwargs) -> dict | None:
+    event_handler("debug", f"Called policy_object_handler on path {path}")
+    if "groupIds" in payload:
+        new_group_ids = []
+        for group_id in payload["groupIds"]:
+            if new_group_id := translate_path(f"/organizations/{kwargs['organizationId']}/policyObjects/groups/{group_id}"):
+                new_group_ids.append(new_group_id)
+        payload["groupIds"] = new_group_ids
+    if "networkIds" in payload:
+        payload.pop("networkIds")
+    if "objectIds" in payload:
+        new_object_ids = []
+        for object_id in payload["objectIds"]:
+            if new_object_id := translate_path(f"/organizations/{kwargs['organizationId']}/policyObjects/{object_id}"):
+                new_object_ids.append(int(new_object_id))
+        payload["objectIds"] = new_object_ids
+    return (payload)
+
+def device_handler(path, api_key, base_url, payload, **kwargs) -> dict | None:
+    event_handler("debug", f"Called device_handler on path {path}")
+    #
+    # This is REALLY inefficent.  Need to fix later.
+    #
+    if "floorPlanId" in payload:
+        floorplan_id = payload["floorPlanId"]
+        #
+        # The device needs to be in a network with a floorplan
+        #
+        if "networkId" in payload and payload["networkId"]:
+            network_name = None
+            floorplan_name = None
+            target_network_id = None
+            target_floorplan_id = None
+            network_id = payload["networkId"]
+            import_floorplan_data = get_from_import(f"/networks/{network_id}/floorPlans")
+            #
+            # Get the name of the floorplan from the import
+            #
+            if import_floorplan_data:
+                for floorplan in import_floorplan_data:
+                    if floorplan["floorPlanId"] == floorplan_id:
+                        floorplan_name = floorplan["name"]
+                if floorplan_name:
+                    import_network_data = get_from_import("/organizations/{organizationId}/networks")
+                    for network in import_network_data:
+                        if network["id"] == network_id:
+                            network_name = network["name"]
+                    if network_name:
+                        #
+                        # Get the name of the floorplan from the current instance
+                        #
+                        dashboard = meraki.DashboardAPI(api_key=args.api_key, base_url=args.base_url, simulate=args.dry_run, output_log=False)
+                        target_networks = dashboard.organizations.getOrganizationNetworks(args.org_id, total_pages='all')
+                        for network in target_networks:
+                            if network["name"] == network_name:
+                                target_network_id = network["id"]
+                        if target_network_id:
+                            target_floorplans = dashboard.networks.getNetworkFloorPlans(target_network_id)
+                            for floorplan in target_floorplans:
+                                if floorplan["name"] == floorplan_name:
+                                    
+                                    target_floorplan_id = floorplan["floorPlanId"]
+                        if target_floorplan_id:
+                            payload["floorPlanId"] = target_floorplan_id
+                            event_handler("debug",f"Translated floorplan {floorplan_name} from {floorplan_id} to {target_floorplan_id}")
+                        else:
+                            event_handler("error", f"Could not find floorplan {floorplan_name} in current instance")
+            else:
+                event_handler("error", f"Could not find floorplan {floorplan_id} in import data")
+    return (payload)
+#
+# This data structure is used to map the API paths to the correct API handler, as well
+# as the subpath and the key used for uniquness.
+#
+api_data_handlers = {
+    "/networks/{networkId}/switch/accessControlLists": switch_acl_handler,
+    "/networks/{networkId}/appliance/vlans": appliance_vlan_handler,
+    "/networks/{networkId}/appliance/vlans/{vlanId}": appliance_vlan_handler,
     "/networks/{networkId}/wireless/ssids/{number}/splash/settings": wireless_handler,
     "/networks/{networkId}/wireless/ssids/{number}/firewall/l3FirewallRules": l3FirewallRules_handler,
-    "/networks/{networkId}/switch/accessControlLists": switch_acl_handler,
-    "/organizations/{organizationId}/admins": org_admin_handler
+    "/organizations/{organizationId}/policyObjects": policy_object_handler,
+    "/organizations/{organizationId}/policyObjects/{policyObjectId}" : policy_object_handler,
+    "/organizations/{organizationId}/policyObjects/groups/{policyObjectGroupId}": policy_object_handler,
+    "/networks/{networkId}/appliance/firewall/l3FirewallRules": l3FirewallRules_handler,
+    "/networks/{networkId}/appliance/contentFiltering": content_policy_handler,
+    "/devices/{serial}": device_handler
+}
 
-#   "/devices/{serial}/switch/ports": switchport_handler,
+api_path_handlers = {
+    "/networks/{networkId}/appliance/vlans/{vlanId}": ["id", "id"],
+    "/networks/{networkId}/groupPolicies/{groupPolicyId}": ["name", "groupPolicyId"],
+    "/networks/{networkId}/floorPlans/{floorPlanId}": ["name", "floorPlanId"],
+    "/organizations/{organizationId}/policyObjects/{policyObjectId}": ["name", "id"],
+    "/organizations/{organizationId}/policyObjects/groups/{policyObjectGroupId}": ["name", "id"]
+    # "/networks/{networkId}/wireless/ssids/{number}/firewall/l3FirewallRules": l3FirewallRules_handler,
+    # "/networks/{networkId}/wireless/ssids/{number}": wireless_handler,
+    # "/networks/{networkId}/wireless/ssids/{number}/splash/settings": wireless_handler,
+    # "/networks/{networkId}/switch/accessControlLists": switch_acl_handler,
+    # "/organizations/{organizationId}/admins": org_admin_handler,
+    # "/devices/{serial}/switch/ports": switchport_handler
 #   "/networks/{networkId}/switch/accessPolicies": default_api_handler,
 #   "/networks/{networkId}/groupPolicies": default_api_handler,
 #   "/networks/{networkId}/appliance/vlans": default_api_handler,
@@ -284,33 +430,76 @@ api_path_handlers = {
 #   "/networks/{networkId}/wireless/ssids/{number}/hotspot20": noop
 }
 
+def get_last_placeholder(path: str) -> str or None:
+    """
+    Splits the given path by '/' and checks if the last non-empty
+    component is a placeholder in braces. If so, returns the
+    placeholder without braces; else returns None.
+    
+    Examples:
+        "/organizations/{organizationId}/policyObjects/groups/{policyObjectGroupId}"
+          -> "policyObjectGroupId"
+        "/networks/{networkId}/wireless/ssids/{number}/firewall/l3FirewallRules"
+          -> None
+    """
+    # Split the path into components, ignoring empty ones
+    components = [comp for comp in path.split('/') if comp]
+    if not components:
+        return None
+
+    last_comp = components[-1]
+    if last_comp.startswith('{') and last_comp.endswith('}'):
+        # Return the placeholder without braces
+        return last_comp[1:-1]
+    else:
+        return None
+
 def get_spec_path(path):
+    context, context_item, subpath = parse_path(path)
+    if not context_item:
+        path = f"/{context}"
+    else:
+        if context_item.startswith('{'):
+            # The contect_item is already a placeholder
+            placeholder = context_item
+        else:
+            # We need to figure out the correct placeholder from the context
+            if context == "organizations":
+                placeholder = "{organizationId}"
+            elif context == "networks":
+                placeholder = "{networkId}"
+            elif context == "devices":
+                placeholder = "{serial}"
+            elif context == "administered":
+                placeholder = context_item
+            else:
+                event_handler("error", f"Unknown path {path} in spec")
+                return None    
+        if context:
+            path = f"/{context}/{placeholder}"
+            if subpath and subpath != "/":
+                path = path + subpath
+        else:
+            event_handler("error", f"Unknown path {path} in spec")
+            return None
     if path in openapi_spec['paths']:
-        event_handler("debug", f"Found {path} in spec")
+        # event_handler("debug", f"Found {path} in spec")
         return path
     else:
+        #
+        # Need to do it the hard way by looking through the spec
+        #
         event_handler("debug", f"Finding match for {path} in spec")
-        # Sort keys by length in descending order to match the longest path first
-        sorted_keys = sorted(index_lookup.keys(), key=len, reverse=True)
-        new_path = None
-        for key in sorted_keys:
-            if path.startswith(key):
-                event_handler("debug", f"Found {key} as best match for {path}.")
-                # Get the value from index_lookup for the matched key
-                index = index_lookup[key]
-
-                # Create a regex pattern to identify the portion to be replaced
-                key_with_param = re.sub(r'\{[^}]+\}', '[^/]+', key) + r'/([^/]+)'
-
-                # Replace the first path component after the match with the placeholder value
-                new_path =  re.sub(key_with_param, key + r'/{' + index + r'}', path)
-                break
-        # Return the original path if no match is found
-        if new_path:
-            return get_spec_path(new_path)
-        else:
-            event_handler("error", f"Could not find match for {path}")
-            return None
+        for key in openapi_spec['paths'].keys():
+            if key.startswith(f"/{context}/"):
+                pattern = re.sub(r"\{[^/]+\}", r"[^/]+", key)
+                regex_pattern = f"^{pattern}$"
+                compiled_regex = re.compile(regex_pattern)
+                if bool(compiled_regex.match(path)):
+                    event_handler("debug", f"Found {key} as best match for {path}.")
+                    return key
+    event_handler("error", f"Could not find match for {path}")
+    return None
 
 
 def get_schema(spec_path, operation, **kwargs):
@@ -328,9 +517,10 @@ def get_schema(spec_path, operation, **kwargs):
                 schema = {}
             responses = [int(item) for item in spec_path_data[verb]["responses"].keys()]
         else:
-            event_handler("warning", f"{path}, Error: Readonly path")
+            event_handler("warning", f"{spec_path}, Error: Readonly path")
             verb = None
             schema = {}
+            responses = {}
     elif operation == 'read':
         if 'get' in spec_path_data:
             verb = 'get'   
@@ -345,41 +535,15 @@ def get_schema(spec_path, operation, **kwargs):
         event_handler("critical", f"Unknown schema operation {operation}.")
         exit (1)
 
-    if "bound_to_template" in kwargs and kwargs["bound_to_template"] == True:
-        #
-        # If this is for a template, we override the template schema, but keep the verb
-        if spec_path in template_schemas:
-            schema = template_schemas[spec_path]
-        else:
-            schema = {}
+    # if "bound_to_template" in kwargs and kwargs["bound_to_template"] == True:
+    #     #
+    #     # If this is for a template, we override the template schema, but keep the verb
+    #     if spec_path in template_schemas:
+    #         schema = template_schemas[spec_path]
+    #     else:
+    #         schema = {}
 
     return (verb, schema, responses)
-
-def is_invalid_payload(data, schema):
-    try:
-        validate(instance=data, schema=schema)
-        return None
-    except jsonschema.exceptions.ValidationError as err:
-        return err.message
-
-def remove_null_values(d):
-    # Create a copy of the dictionary to avoid modifying the original during iteration
-    keys_to_delete = []
-
-    for key, value in d.items():
-        if isinstance(value, dict):
-            # Recurse into the nested dictionary
-            remove_null_values(value)
-            # If the nested dictionary is empty after recursion, mark the key for deletion
-            if not value:
-                keys_to_delete.append(key)
-        elif value is None:
-            # Mark keys with null values for deletion
-            keys_to_delete.append(key)
-
-    # Remove keys marked for deletion
-    for key in keys_to_delete:
-        del d[key]
 
 def meraki_request(url, api_key, verb="get", responses=[200], payload={}, parameters=[], **kwargs):
     headers = {
@@ -432,7 +596,21 @@ def meraki_request(url, api_key, verb="get", responses=[200], payload={}, parame
                 event_handler("warning", f"Error 429: Rate limit exceeded. Retrying in {wait_retry} seconds...")
                 time.sleep(wait_retry)
             else:
-                event_handler("error", f"{url}, Error {response.status_code} ({response.reason}): {response.text}")
+                try:
+                    # Attempt to parse the string as JSON
+                    error_resonse = json.loads(response.text)
+                    if "errors" in error_resonse:
+                        error_message = error_resonse["errors"][0]
+                    else:
+                        error_message = response.text
+                except json.JSONDecodeError:
+                    # If parsing fails, return the original string
+                    error_message = response.text
+                if expected_error_message(error_message):
+                        severity = "warning"
+                else:
+                    severity = "error"
+                event_handler(severity, f"{url}, Error {response.status_code} ({response.reason}): {error_message}")
                 return None
         
         except requests.exceptions.RequestException as e:
@@ -472,18 +650,25 @@ def meraki_write_path(path, api_key, base_url, raw_payload, api_handler=False, *
     else:
         verb, schema, responses = get_schema(spec_path, "write", **kwargs)
 
+    if verb == None:
+        event_handler("error", f"Unable to write to {path}")
+        return {}
+
     full_path = path.format(**kwargs)
     url = f"{base_url}" + full_path
 
-    if "bound_to_template" in kwargs and kwargs["bound_to_template"] == True and schema == {}:
-        event_handler("info", f"Network {kwargs['networkId']} is bound to a template. Ignoring {full_path}")
-        return {}
+    # if "bound_to_template" in kwargs and kwargs["bound_to_template"] == True and schema == {}:
+    #     event_handler("info", f"Network {kwargs['networkId']} is bound to a template. Ignoring {full_path}")
+    #     return {}
 
     # See if we need a special handler for this path
-    if spec_path in api_path_handlers:
-        processed_payload = api_path_handlers[spec_path](path, api_key, base_url, raw_payload, **kwargs)
+    if spec_path in api_data_handlers:
+        processed_payload = api_data_handlers[spec_path](path, api_key, base_url, raw_payload, **kwargs)
     else:
         processed_payload = raw_payload
+
+    if processed_payload == None:
+        return {}
 
     # Reduce the payload down to what is in the schema for the put/post operation 
     filtered_payload = filter_data_by_schema(processed_payload, schema)
@@ -503,17 +688,13 @@ def meraki_write_path(path, api_key, base_url, raw_payload, api_handler=False, *
         #
         # Diff the current state and the proposed state
         #
-        diff_dict = list(diff(filtered_current_data, filtered_payload))
+        diff_dict = list(diff(filtered_current_data, filtered_payload, ignore=DIFF_IGNORE_KEYS))
     else:
         write_only_url = True
         diff_dict = []
         event_handler("debug", f"Unable to get path {full_path}")
 
-
-
-    # filtered_payload = remove_null_values(filtered_payload)
-
-    if processed_payload and (diff_dict or write_only_url):
+    if filtered_payload and (diff_dict or write_only_url):
         change_needed = True
         if show_diff:
             print(color_message(path.format(**kwargs), "yellow"))
@@ -538,7 +719,9 @@ def meraki_write_path(path, api_key, base_url, raw_payload, api_handler=False, *
 
     if change_needed:
         # if args.log_level == "DEBUG":
-        return meraki_request(url, api_key, payload=processed_payload, verb=verb, responses=responses, **kwargs)
+        # print(f"Writing to {url}:")
+        # pprint.pp(filtered_payload)
+        return meraki_request(url, api_key, payload=filtered_payload, verb=verb, responses=responses, **kwargs)
     else:
         return {}
 
@@ -578,11 +761,19 @@ async def merakiBulkGet(session, path, api_key, base_url, semaphore):
                         else:
                             wait_retry = API_RETRY_DEFAULT_WAIT
                         event_handler("debug", f"Received {response.status} status code. Retrying url {url} in {wait_retry} seconds...")
-                    elif response.status in [400, 404]:
-                        event_handler("error", f"{url}, Error {response.status} ({response.reason})")
-                        return (path, {})  
+                    # elif response.status in [400, 404]:
+                    #     event_handler("error", f"{url}, Error {response.status} ({response.reason})")
+                    #     return (path, {})  
                     else:
-                        event_handler("error", f"{url}, Error {response.status} ({response.reason}): {response.text}")
+                        severity = "error"
+                        error_response = await response.json()
+                        if isinstance(error_response, dict) and "errors" in error_response:
+                            error_message = error_response["errors"][0]
+                            if expected_error_message(error_message):
+                                severity = "warning"
+                        else:
+                            error_message = error_response
+                            event_handler(severity, f"{url}, Error {response.status} ({response.reason}): {error_message}")
                         return (path, {})
                 retry = retry + wait_retry
                 await asyncio.sleep(retry)
@@ -593,7 +784,21 @@ async def merakiBulkGet(session, path, api_key, base_url, semaphore):
             except Exception as e:
                 event_handler("error", f"An unexpected error occurred: {str(e)}")
 
-async def fetch_all_paths(paths, headers, base_url, max_concurrent_requests):
+def add_to_results(result_dict, path, result):
+    match = re.match('^/([^/]+)/([^/]+)(/[^{}]*)?$', path)
+    if result:
+        if match.group(1) not in result_dict:
+            result_dict[match.group(1)] = {}
+        if match.group(2) not in result_dict[match.group(1)]:
+            result_dict[match.group(1)][match.group(2)] = {}
+            result_dict[match.group(1)][match.group(2)]['paths'] = {}
+        if match.group(3):
+            path = match.group(3)
+        else:
+            path = "/" 
+        result_dict[match.group(1)][match.group(2)]['paths'][path] = result
+
+async def fetch_all_paths(paths, headers, base_url, max_concurrent_requests, result_dict):
     """
     Fetches the content of all URLs asynchronously with headers, limiting concurrent requests.
 
@@ -608,32 +813,155 @@ async def fetch_all_paths(paths, headers, base_url, max_concurrent_requests):
     semaphore = asyncio.Semaphore(max_concurrent_requests)
     async with aiohttp.ClientSession() as session:
         tasks = [merakiBulkGet(session, path, headers, base_url, semaphore) for path in paths]
-        result_dict = {}
         for task in asyncio.as_completed(tasks):
             # as_completed returns an iterator, so we just have to await the iterator and not call it
             (path, result) = await task
-            match = re.match('^/([^/]+)/([^/]+)(/[^{}]*)?$', path)
-            if result:
-                if match.group(1) not in result_dict:
-                    result_dict[match.group(1)] = {}
-                if match.group(2) not in result_dict[match.group(1)]:
-                    result_dict[match.group(1)][match.group(2)] = {}
-                    result_dict[match.group(1)][match.group(2)]['paths'] = {}
-                result_dict[match.group(1)][match.group(2)]['paths'][match.group(3)] = result
+            add_to_results(result_dict, path, result)
     return result_dict
 
-def filter_data_by_schema(data, schema):
-    """Recursively filters the data to match the structure defined by the schema."""
-    if 'properties' in schema:
-        filtered_data = {}
-        for key, subschema in schema['properties'].items():
-            if key in data:
-                filtered_data[key] = filter_data_by_schema(data[key], subschema)
-        return filtered_data
-    elif 'items' in schema and isinstance(data, list):
-        return [filter_data_by_schema(item, schema['items']) for item in data]
-    else:
-        return data
+def json_schema_type_to_python_type(schema_type: str):
+    """
+    Map a JSON Schema type (string) to a Python type or tuple of types,
+    suitable for isinstance checks.
+    """
+    type_map = {
+        "string": str,
+        "number": (int, float),  # JSON 'number' can be int or float
+        "integer": int,
+        "boolean": bool,
+        "array": list,
+        "object": dict,
+        "null": type(None),      # for checking None
+    }
+    return type_map.get(schema_type, None)
+
+
+def filter_data_by_schema(data, schema, remove_empty_data=True):
+    """
+    Filters the given JSON-like data according to the given JSON Schema rules:
+      1) Only keep keys present in the schema's "properties".
+      2) If the data type for a key doesn't match the schema's "type":
+         - Replace it with the schema's "default" if available,
+           otherwise remove it.
+      3) If remove_empty_data=True, remove keys whose value is "empty"
+         (None, empty string, empty list/dict).
+      4) Recursively apply this to nested objects (type=object) and
+         arrays (type=array).
+
+    :param data:   Python object (usually a dict) representing JSON data
+    :param schema: A dict representing a *simplified* JSON Schema
+    :param remove_empty_data: True to remove "empty" values (default True)
+    :return: A new, filtered Python object adhering to the schema
+    """
+
+    def is_empty_value(value):
+        """Determine if a value should be considered 'empty'."""
+        if value is None:
+            return True
+        if isinstance(value, str) and value.strip() == "":
+            return True
+        if isinstance(value, (list, dict)) and not value:
+            return True
+        return False
+
+    def json_schema_type_to_python_type(schema_type):
+        """
+        Map a JSON Schema type to a Python type or tuple of types for isinstance().
+        (Simple approach; real schemas can have more advanced type definitions.)
+        """
+        type_map = {
+            "string": str,
+            # 'number' can be int or float in JSON
+            "number": (int, float),
+            "integer": int,
+            "boolean": bool,
+            # Typically a JSON "object" is a Python dict
+            "object": dict,
+            # Typically a JSON "array" is a Python list
+            "array": list,
+            "null": type(None),
+        }
+        return type_map.get(schema_type, object)  # fallback to `object`
+
+    def filter_value_by_schema(value, subschema):
+        """
+        Recursively filter a single value according to a given (sub)schema.
+        Returns the filtered value, or None if the value is removed.
+        """
+        # 1) Determine the declared type in the schema
+        declared_type = subschema.get("type")
+        default = subschema.get("default", None)
+
+        # 2) If no "type" in schema, we do nothing special. 
+        #    But let's enforce a fallback to avoid surprises:
+        if not declared_type:
+            # If there's no defined type, either keep the value as-is or return None if it's "empty"
+            if remove_empty_data and is_empty_value(value):
+                return None
+            return value
+
+        # 3) If declared type is "object"
+        if declared_type == "object":
+            # Value must be a dict
+            if not isinstance(value, dict):
+                # Type mismatch
+                return default if default is not None else None
+
+            # Recursively filter each property
+            properties = subschema.get("properties", {})
+            filtered = {}
+            for key, prop_schema in properties.items():
+                sub_val = value.get(key, None)
+                filtered_sub_val = filter_value_by_schema(sub_val, prop_schema)
+                # Skip if result is None
+                if filtered_sub_val is not None:
+                    # Optionally remove if empty
+                    if remove_empty_data and is_empty_value(filtered_sub_val):
+                        continue
+                    filtered[key] = filtered_sub_val
+            # Return the filtered object
+            # If it's empty and remove_empty_data is True, return None
+            if remove_empty_data and not filtered:
+                return None
+            return filtered
+
+        # 4) If declared type is "array"
+        if declared_type == "array":
+            # Value must be a list
+            if not isinstance(value, list):
+                # Type mismatch
+                return default if default is not None else None
+
+            items_schema = subschema.get("items", {})
+            filtered_list = []
+            for elem in value:
+                filtered_elem = filter_value_by_schema(elem, items_schema)
+                if filtered_elem is not None:
+                    # Optionally remove if empty
+                    if remove_empty_data and is_empty_value(filtered_elem):
+                        continue
+                    filtered_list.append(filtered_elem)
+            # Return the filtered list
+            if remove_empty_data and not filtered_list:
+                return None
+            return filtered_list
+
+        # 5) If declared type is one of the basic types: string, number, integer, boolean, null
+        python_type = json_schema_type_to_python_type(declared_type)
+        if not isinstance(value, python_type):
+            # Type mismatch => use default if provided
+            if value is not None:
+                event_handler("warning", f"Type mismatch: {value} is not of type {declared_type}")
+            return default if default is not None else None
+
+        # 6) We have a valid type. Optionally remove if empty.
+        if remove_empty_data and is_empty_value(value):
+            return None
+
+        return value
+
+    # Start the recursion at the top level
+    return filter_value_by_schema(data, schema)
 
 def print_tabular_data(data, columns_to_display, sort_by=None, ascending=True):
     """
@@ -678,38 +1006,162 @@ def print_csv_data(data, columns, sort_by=None, ascending=True):
         df.to_csv(output_file, index=False)
     else:
         print(df.to_csv(index=False))
-          
 
+#
+# This returns everything after the first placeholder.  If there is nothing after the first placeholder, it returns None
+#           
+def get_subpath(path):
+    # Use regex to find all occurrences of strings inside {}
+    placeholders = list(re.finditer(r'\{(.*?)\}', path))
+    
+    if not placeholders:
+        # If no placeholders exist, return an empty string
+        return ""
+    
+    # Get the end position of the first placeholder
+    first_placeholder_end = placeholders[0].end()
+    
+    # Get the remainder of the string starting with the slash after the first placeholder
+    remainder = path[first_placeholder_end:]
+    
+    # Ensure the remainder starts with a slash or is just a slash
+    if not remainder.startswith('/'):
+        remainder = '/' + remainder
+    
+    return remainder
+
+def get_basepath(path: str, n: int = 1, include_placeholder: bool = False):
+    """
+    Given a path like "/networks/{networkId}/wireless/ssids/{number}",
+    and an integer n, returns a tuple:
+      (placeholder_var, partial_path_up_to_nth_placeholder)
+
+    - placeholder_var is the raw variable name, e.g. "networkId".
+    - partial_path_up_to_nth_placeholder is an absolute path
+      that includes or excludes the nth placeholder based on
+      'include_placeholder'.
+
+    If n exceeds the number of placeholders in the string, raises ValueError.
+    """
+
+    # 1) Split on '/' to get path segments (ignore empty segments from leading slash)
+    segments = [seg for seg in path.split('/') if seg]
+
+    # 2) Identify which segments are placeholders, collecting their indices
+    #    A 'placeholder' is anything that starts with '{' and ends with '}'.
+    placeholder_indices = [
+        i for i, seg in enumerate(segments)
+        if seg.startswith('{') and seg.endswith('}')
+    ]
+
+    # 3) Check if n is valid
+    if n < 1 or n > len(placeholder_indices):
+        raise ValueError(
+            f"Requested placeholder number {n}, "
+            f"but only {len(placeholder_indices)} placeholder(s) found."
+        )
+
+    # 4) Get the index of the nth placeholder in the path segments
+    nth_placeholder_index = placeholder_indices[n - 1]
+
+    # 5) Extract the placeholder variable name (e.g., "networkId" for "{networkId}")
+    placeholder_var = segments[nth_placeholder_index].strip('{}')
+
+    # 6) Build the partial path (up to the nth placeholder, inclusive or exclusive)
+    if include_placeholder:
+        # Include the placeholder in the partial path
+        # => up to index 'nth_placeholder_index' (inclusive)
+        end_slice = nth_placeholder_index + 1
+    else:
+        # Exclude the placeholder and the slash before it
+        # => up to index 'nth_placeholder_index' (exclusive)
+        end_slice = nth_placeholder_index
+
+    partial_segments = segments[:end_slice]
+
+    # 7) Join them back with slashes, prepending a leading slash for an absolute path.
+    if partial_segments:
+        partial_path = '/' + '/'.join(partial_segments)
+    else:
+        # If empty, it means the placeholder was the very first segment
+        partial_path = '/'
+
+    return partial_path, placeholder_var
+
+#
+# This returns everything up to and including the first placeholder.
+#  
+# def get_basepath(path):
+#     # Use regex to find the first placeholder
+#     match = re.search(r'\{(.*?)\}', path)
+    
+#     if not match:
+#         # If no placeholder, return the entire string and None
+#         return [path, None]
+    
+#     # Get the position of the first placeholder
+#     first_placeholder_start = match.start()
+    
+#     # Get the substring before the first placeholder (excluding the trailing slash)
+#     before_placeholder = path[:first_placeholder_start].rstrip('/')
+    
+#     # Extract the first placeholder's content
+#     first_placeholder = match.group(1)
+    
+#     return [before_placeholder, first_placeholder]
 
 async def export_command(args):
     #
     # Build the list of paths that we want to export
     #
     api_paths = []
+    api_paths_needing_expansion = []
+    categorized_paths = {}
     network_ids = []
     serial_numbers = []
-    config_template_ids = []
     stacks_by_network = {}
     parameters = []
     serial_parameters = []
+    result_dict = {}
+    export_all = True
+
+    # We are going to use a combiation of meraki python library and Rest to get the data
+    # because depending on this privides the best value.
+    dashboard = meraki.DashboardAPI(api_key=args.api_key, base_url=args.base_url, inherit_logging_config=True, output_log=False)
+
+    # The first step is to get the list of network IDs that we are going to export
+    #
+    # A list of network IDs was provided
+    #
     if args.network_ids:
+        export_all = False
         network_ids = args.networks
         for network_id in network_ids:
             parameters.append(f"networkIds[]={network_id}")
         networks = meraki_read_path("/organizations/{organizationId}/networks", args.api_key, args.base_url, organizationId=args.org_id, parameters=parameters)
         serial_parameters = parameters
+    #
+    # A list of tags was provided
+    #
     elif args.tags:
-        parameters = ['tagsFilterType=withAnyTags']
-        for tag in args.tags:
-            parameters.append(f"tags[]={tag}")
-        networks = meraki_read_path("/organizations/{organizationId}/networks", args.api_key, args.base_url, organizationId=args.org_id, parameters=parameters)
+        export_all = False
+        # parameters = ['tagsFilterType=withAnyTags']
+        # for tag in args.tags:
+        #     parameters.append(f"tags[]={tag}")
+        # networks = meraki_read_path("/organizations/{organizationId}/networks", args.api_key, args.base_url, organizationId=args.org_id, parameters=parameters)
+        networks = dashboard.organizations.getOrganizationNetworks(args.org_id, tags=args.tags, total_pages='all')
+        network_ids = [item["id"] for item in networks]
         for network in networks:
             serial_parameters.append(f"networkIds[]={network['id']}")
-
+    #
+    # A list of network names was provided
+    #
     elif args.networks:
+        export_all = False
         networks = []
         # Create a dict of networks by name
-        network_list = meraki_read_path("/organizations/{organizationId}/networks", args.api_key, args.base_url, organizationId=args.org_id)
+        network_list = dashboard.organizations.getOrganizationNetworks(args.org_id, total_pages='all')
+        # network_list = meraki_read_path("/organizations/{organizationId}/networks", args.api_key, args.base_url, organizationId=args.org_id)
         networks_by_name = {network['name']: network for network in network_list}
         # Find matches and retrieve their networkId
         for network_name in args.networks:
@@ -719,40 +1171,47 @@ async def export_command(args):
                     network_id = networks_by_name[key].get('id')
                     serial_parameters.append(f"networkIds[]={network_id}")
                     network_ids.append(network_id)
-
-    # if network_ids:
-    #     networks = []
-    #     template_ids =[]
-    #     for network_id in network_ids:
-    #         network = meraki_read_path("/networks/{networkId}", args.api_key, args.base_url, networkId=network_id)
-    #         networks.append(network)
-    #         parameters.append(f"networkIds[]={network_id}")
-
-    #         #
-    #         # Collect the config templates that the networks are bound to
-    #         #                
-    #         if "isBoundToConfigTemplate" in network and network["isBoundToConfigTemplate"] == True:
-    #             if network["configTemplateId"] not in template_ids:
-    #                 template_ids.append(network["configTemplateId"])
-    #     network_ids.extend(template_ids)
     else:
         event_handler("info", f"Exporting all networks for organization {args.org_id}")
-        networks = meraki_read_path("/organizations/{organizationId}/networks", args.api_key, args.base_url, organizationId=args.org_id)
+        # networks = meraki_read_path("/organizations/{organizationId}/networks", args.api_key, args.base_url, organizationId=args.org_id)
+        networks = dashboard.organizations.getOrganizationNetworks(args.org_id, tags=args.tags, total_pages='all')
         # List comprehension to extract serial numbers
         network_ids = [item["id"] for item in networks]
         #
         # Get all of the templates for export
         #
-        config_template_templates = meraki_read_path("/organizations/{organizationId}/configTemplates", args.api_key, args.base_url, organizationId=args.org_id)
+        # config_template_templates = meraki_read_path("/organizations/{organizationId}/configTemplates", args.api_key, args.base_url, organizationId=args.org_id)
+        config_template_templates = dashboard.organizations.getOrganizationConfigTemplates(args.org_id)
         # List comprehension to extract serial numbers
         network_ids = network_ids + [item["id"] for item in config_template_templates]
-    event_handler("info", f"Exporting networks/templates {network_ids}")   
-    #
-    # Get all of the devices for export
-    #
-    devices = meraki_read_path("/organizations/{organizationId}/devices", args.api_key, args.base_url, organizationId=args.org_id, parameters=serial_parameters)
+
+    if export_all:
+        event_handler("info", f"Exporting all networks/templates")
+        devices = dashboard.organizations.getOrganizationDevices(args.org_id, total_pages='all')
+    else:
+        template_ids = []
+        networks_by_id = {network['id']: network for network in networks}
+        if not args.skip_templates:
+            #
+            # Get the templates that the networks are bound to
+            #
+            for network_id in network_ids:
+                network = networks_by_id[network_id]
+                #
+                # Collect the config templates that the networks are bound to
+                #                
+                if "isBoundToConfigTemplate" in network and network["isBoundToConfigTemplate"] == True:
+                    if network["configTemplateId"] not in template_ids:
+                        template_ids.append(network["configTemplateId"])
+            network_ids.extend(template_ids)
+
+        event_handler("info", f"Exporting networks/templates {network_ids}")
+        devices = dashboard.organizations.getOrganizationDevices(args.org_id, networkIds = network_ids, total_pages='all')
+    
+    devices_by_serial = {device['serial']: device for device in devices}
     # List comprehension to extract serial numbers
-    serial_numbers = [item["serial"] for item in devices]
+    serial_numbers = [item["serial"] for item in devices if item["networkId"] in network_ids]
+
     for network in networks:
         if "switch" in network["productTypes"]:
             #
@@ -768,7 +1227,7 @@ async def export_command(args):
                         stack_interface_ids.append(interface["interfaceId"])
                     stacks_by_network[network["id"]][stack["id"]] = stack_interface_ids
     #
-    # Find all of the paths out of the spec that apply to what we are trying to export
+    # Find all of the paths out of the spec that apply to what we are trying to export and categorize by context
     #
     for path, verbs in openapi_spec['paths'].items():
         # Only get paths that we can write something back to.
@@ -779,112 +1238,89 @@ async def export_command(args):
         elif 'get' not in verbs.keys():
             event_handler("debug", f"{path} is write-only")
             continue
-        elif (len(verbs) == 1 and "get" in verbs) and not (args.full and path in readonly_exceptions):
+        elif not bool(set(['put', 'post']) & set(verbs.keys())):
             event_handler("debug", f"{path} is read-only")
-            continue               
+            continue
+        # elif bool(set(SKIP_TAGS) & set(verbs['get']['tags'])):
+        #     event_handler("debug", f"{path} is being skipped")
+        #     continue       
         else:
-            get_tags = verbs['get']['tags']
-            #
-            # /networks/{networkId}: We need to itterate over all of the networks
-            #
-            if match := re.match('^/networks/{networkId}/?(.*)$', path):
-                if args.contexts and not 'networks' in args.contexts:
-                    continue
-                base_path = "/networks/{networkId}"
-                sub_path = "/" + match.group(1)
-                for network in networks:
-                    network_id = network["id"]
-                    # Check to see if this path is approriete for this network
-                    if (not 'networks' in get_tags) and (not bool(set(network["productTypes"]) & set(get_tags))):
-                        event_handler("debug", f"Skipping {path} for {network['name']}: {network['productTypes']}")
-                        continue
-                    #
-                    # Wireless SSIDS
-                    #
-                    if match := re.match('^/wireless/ssids/{number}(/.*)?$', sub_path):
-                        if match.group(1):
-                            wireless_path = match.group(1)
-                        else:
-                            wireless_path = ""
-                        if match := re.match('^/[^{}]+{', wireless_path):
-                            # Unhandled paths because they need more dereferencing
-                            path_exported = False
-                        else:
-                            path_exported = True
-                            # We need to have one of each of these paths per device
-                            for number in range(0, 14):
-                                api_paths.append(f"/networks/{network_id}/wireless/ssids/{number}" + wireless_path)
-                    #
-                    # Switch Stacks
-                    # 
-                    elif match := re.match('^/switch/stacks/{switchStackId}(/.+)?$', sub_path):
-                        if network_id not in stacks_by_network:
-                            # There are no stacks
-                            continue
-                        if match.group(1):
-                            stack_path = match.group(1)
-                        else:
-                            stack_path = ""
-                        if match := re.match('^/[^{}]+{', stack_path):
-                            # Unhandled paths because they need more dereferencing
-                            path_exported = False
-                        else:
-                            path_exported = True
-                            # We need to have one of each of these paths per device
-                            for stack_id, stack_interfaces in stacks_by_network[network_id].items():
-                                if match := re.match('^/routing/interfaces/{interfaceId}(/.*)?$', stack_path):
-                                    if match.group(1):
-                                        if match.group(1) == "/dhcp":
-                                            for interface_id in stack_interfaces:
-                                                api_paths.append(f"/networks/{network_id}/switch/stacks/{stack_id}/routing/interfaces/{interface_id}/dhcp")
-                                        else:
-                                            api_paths.append(f"/networks/{network_id}/switch/stacks/{stack_id}/routing/interfaces/{interface_id}" + match.group(1))
-                                else:
-                                    api_paths.append(f"/networks/{network_id}/switch/stacks/{stack_id}" + stack_path)
-                    elif match := re.match('^/[^{}]+{', sub_path):
-                        # Unhandled paths because they need more dereferencing
-                        path_exported = False
+            context = path.split('/')[1]
+            if context not in categorized_paths:
+                categorized_paths[context] = {}
+            categorized_paths[context][path] = verbs
+
+    #
+    # The first step is to itterate each path over the networks and devices specifed by the user.  Fully
+    # expanded paths are then sent to retrieve their values.  Paths that have placeholders are stored for
+    # later expansion.
+    #
+    for context in categorized_paths:
+        paths = categorized_paths[context]
+        if context == "networks":
+            for network_id in network_ids:
+                for path, verbs in paths.items():
+                    subpath = get_subpath(path)
+                    placeholders = re.findall(r'\{(.*?)\}', subpath)
+                    if subpath == "/":
+                        new_path = f"/networks/{network_id}"
                     else:
-                        path_exported = True
-                        api_paths.append(f"/networks/{network_id}" + sub_path)
-            #   
-            # /organizations/{args.org_id}
-            #
-            elif match := re.match('^/organizations/{organizationId}/?(.*)$', path):
-                sub_path = '/' + match.group(1)
-                if match := re.match('^/[^{}]+{', sub_path):
-                    # Unhandled paths because they need more dereferencing
-                    path_exported = False
+                        new_path = f"/networks/{network_id}{subpath}"
+                    if placeholders:
+                        api_paths_needing_expansion.append(new_path)
+                    else:
+                        api_paths.append(new_path)
+        elif context == "devices":
+            for serial in serial_numbers:
+                for path, verbs in paths.items():
+                    subpath = get_subpath(path)
+                    # get_tags = verbs['get']['tags']
+                    # device_type = get_product_type(devices_by_serial[serial]["model"])
+                    # if subpath == "/" or device_type in get_tags:
+                    placeholders = re.findall(r'\{(.*?)\}', subpath)
+                    if subpath == "/":
+                        new_path = f"/devices/{serial}"
+                    else:
+                        new_path = f"/devices/{serial}{subpath}"
+                    if placeholders:
+                        api_paths_needing_expansion.append(new_path)
+                    else:
+                        api_paths.append(new_path)
+                    # else:
+                    #     event_handler("debug", f"Not exporting path: {path}, subpath: {subpath} for device {serial}({device_type}) because it is not a {get_tags}")                    
+        elif context == "organizations":
+            for path, verbs in paths.items():
+                subpath = get_subpath(path)
+                placeholders = re.findall(r'\{(.*?)\}', subpath)
+                if subpath == "/":
+                    new_path = f"/organizations/{args.org_id}"
                 else:
-                    path_exported = True    
-                    api_paths.append(f"/organizations/{args.org_id}" + sub_path)
-                    
-            #
-            # /devices/{serial}
-            #
-            elif match := re.match('^/devices/{serial}/?(.*)$', path):
-                if args.contexts and not 'devices' in args.contexts:
-                    continue
-                sub_path = '/' + match.group(1)
-                if match := re.match('^/[^{}]+{', sub_path):
-                    # Unhandled paths because they need more dereferencing
-                    path_exported = False
-                elif devices:                   
-                    path_exported = True
-                    # We need to have one of each of these paths per device
-                    for device in devices:
-                        device_type = get_product_type(device["model"])
-                        if sub_path == "/" or device_type in get_tags:
-                            api_paths.append(f"/devices/{device['serial']}" + sub_path)
-            #
-            # "/devices/{serial}/switch/routing/interfaces/{interfaceId}"
-            #
-        if not path_exported:
-            event_handler("warning", f"{path} not exported")
+                    new_path = f"/organizations/{args.org_id}{subpath}"
+                if placeholders:
+                    api_paths_needing_expansion.append(new_path)
+                else:
+                    api_paths.append(new_path)
+        else:
+            event_handler("warning", f"Skipping {context} because it is not supported for export")
+                
+    # 
+    # Make the initial bulk request to the async function
     #
-    # Make a bulk request to the async function
+    await fetch_all_paths(api_paths, args.api_key, args.base_url, args.max_concurrent_requests, result_dict)
     #
-    result_dict = await fetch_all_paths(api_paths, args.api_key, args.base_url, args.max_concurrent_requests)
+    # Loop expanding the apis and doing a bulk fetch until everything is expanded or we hit max tries
+    #
+    loop_count = 0
+    while api_paths_needing_expansion and loop_count < 5:
+        event_handler("debug", f"De-referenceing pass {loop_count}")
+        api_paths, api_paths_needing_expansion = expand_api_paths(api_paths_needing_expansion, result_dict)
+        await fetch_all_paths(api_paths, args.api_key, args.base_url, args.max_concurrent_requests, result_dict)
+        loop_count = loop_count + 1
+
+    #   continue
+    #
+    # Save the results to a file
+    #
     if args.output_file:
         output_file = args.output_file
     else:
@@ -895,9 +1331,54 @@ async def export_command(args):
 
     with open(output_file, 'w') as file:
         result_dict['errors'] = error_log
+        result_dict['api_paths_needing_expansion'] = api_paths_needing_expansion
         json.dump(result_dict, file, indent=4)
     event_handler("info", f"Results saved to {output_file}")
 
+def expand_api_paths(api_paths_to_expand, result_dict):
+    api_paths_still_needing_expansion = []
+    api_paths = []
+    for path in api_paths_to_expand:
+        source_key = None
+        source_list = []
+        basepath, key = get_basepath(path)
+        if source_key := key_lookup(path):
+            source_key_list = [key]
+        else:
+            source_key_list = [key] + ['id', 'number']
+        _, context, context_item, *the_rest = basepath.split('/')
+        sub_basepath = '/' + '/'.join(the_rest)
+        if context in result_dict:
+            if context_item in result_dict[context]:
+                if sub_basepath in result_dict[context][context_item]['paths']:
+                    # The path is already in the data collected
+                    source_list = result_dict[context][context_item]['paths'][sub_basepath]
+                else:
+                    # See if we can grab the path
+                    source_list = meraki_read_path(basepath, args.api_key, args.base_url)
+                    if source_list:
+                        add_to_results(result_dict, basepath, source_list)
+
+                if isinstance(source_list, list) and len(source_list) > 0:
+                    for try_key in source_key_list:
+                        if try_key in source_list[0]:
+                            source_key = try_key
+                    if source_key:
+                        for item in source_list:
+                            if source_key in item:
+                                new_path = re.sub(r'\{.*?\}', str(item[source_key]), path, count=1)
+                                placeholders = re.findall(r'\{(.*?)\}', path)
+                                if len(placeholders) > 1:
+                                    api_paths_still_needing_expansion.append(new_path)
+                                else:
+                                    api_paths.append(new_path)
+                            else:
+                                event_handler("error", f"Key {source_key} not found in {item}")
+                    else:
+                        event_handler("warning", f"Unable to expand {path} because the key is not found in the source data")
+                else:
+                    event_handler("debug", f"Unable to expand {path} because the base path is not found in the source data")
+    return api_paths, api_paths_still_needing_expansion
 
 def import_file(filename):
         event_handler("info", f"Reading {filename}...")
@@ -973,7 +1454,12 @@ def show_command(args):
                     else:
                         device["network"] = device["networkId"]
                     devices.append(device)
-
+            if args.json:
+                pprint.pp(devices)
+            elif args.csv:
+                print_csv_data(devices, ['name', 'serial', 'mac', 'model', 'network', 'tags'], sort_by='network')
+            else:
+                print_tabular_data(devices, ['name', 'serial', 'mac', 'model', 'network', 'tags'], sort_by='network')
         else:
             kwargs = {}
             if args.serial:
@@ -999,12 +1485,12 @@ def show_command(args):
                 else:
                     device["status"] = "Unknown"
 
-        if args.json:
-            pprint.pp(devices)
-        elif args.csv:
-            print_csv_data(devices, ['name', 'serial', 'mac', 'model', 'status', 'network', 'tags'], sort_by='network')
-        else:
-            print_tabular_data(devices, ['name', 'serial', 'mac', 'model', 'status', 'network', 'tags'], sort_by='network')
+            if args.json:
+                pprint.pp(devices)
+            elif args.csv:
+                print_csv_data(devices, ['name', 'serial', 'mac', 'model', 'status', 'network', 'tags'], sort_by='network')
+            else:
+                print_tabular_data(devices, ['name', 'serial', 'mac', 'model', 'status', 'network', 'tags'], sort_by='network')
     elif args.show_command == 'inventory':
         # If a data file is provided, use that data instead of making an API call
         if args.input_file:
@@ -1032,17 +1518,29 @@ def show_command(args):
                     device["network"] = device["networkId"]
                 if device["serial"] in devices_statuses_by_serial:
                     device["status"] = devices_statuses_by_serial[device["serial"]]["status"]
+                    device["lanIp"] = devices_statuses_by_serial[device["serial"]]["lanIp"]
                 else:
                     device["status"] = "Inventory"
+                    device["lanIp"] = ""
         if devices:
             if args.json:
                 pprint.pp(devices)
             elif args.csv:
-                print_csv_data(devices, ['name', 'serial', 'mac', 'model', 'status', 'network', 'tags'], sort_by='network')
+                print_csv_data(devices, ['name', 'serial', 'mac', 'lanIp', 'model', 'status', 'network', 'tags'], sort_by='network')
             else:
-                print_tabular_data(devices, ['name', 'serial', 'mac', 'model', 'status', 'network', 'tags'], sort_by='network')
+                print_tabular_data(devices, ['name', 'serial', 'mac', 'lanIp', 'model', 'status', 'network', 'tags'], sort_by='network')
     elif args.show_command == 'templates':
-        templates = meraki_read_path("/organizations/{organizationId}/configTemplates", args.api_key, args.base_url, organizationId=args.org_id)
+        if args.input_file:
+            import_data = import_file(args.input_file)
+            source_org_id = next(iter(import_data["organizations"]))
+            network_ids = import_data["networks"].keys()
+            org_templates = import_data["organizations"][source_org_id]["paths"]["/configTemplates"]
+            templates = []
+            for template in org_templates:
+                if template["id"] in network_ids:
+                    templates.append(template)
+        else:        
+            templates = meraki_read_path("/organizations/{organizationId}/configTemplates", args.api_key, args.base_url, organizationId=args.org_id)
         if args.json:
             pprint.pp(templates)
         else:
@@ -1093,9 +1591,23 @@ def show_command(args):
 
         else:
             print_tabular_data(admins, ['name', 'email', 'accountStatus', 'hasApiKey', 'lastActive', 'networks'], sort_by='name')      
+    elif args.show_command == 'client-policy':
+        all_clients = []
+        networks = dashboard.organizations.getOrganizationNetworks(args.org_id, total_pages='all')
+        for network in networks:
+            policies_by_client = dashboard.networks.getNetworkPoliciesByClient(network["id"], timespan=args.timespan*86400, total_pages='all')
+            # clients = dashboard.networks.getNetworkClients(network["id"], timespan=args.timespan*86400, total_pages='all')
+            for client in policies_by_client:
+                client["network"] = network["name"]
+                client["networkId"] = network["id"]
+                all_clients.append(client)
+        if args.output_file:
+            export_file(args.output_file, all_clients)
+        else:
+            pprint.pp(all_clients)
     elif args.show_command == 'me':
-        organizations = meraki_read_path("/organizations", args.api_key, args.base_url)
-        me = meraki_read_path("/administered/identities/me", args.api_key, args.base_url)
+        organizations = dashboard.organizations.getOrganizations()
+        me = dashboard.administered.getAdministeredIdentitiesMe()
         org_name = "Unknown"
         for org in organizations:
             if org["id"] == args.org_id:
@@ -1108,7 +1620,221 @@ def show_command(args):
     else:
         event_handler("critical", f"Unknown show command {args.show_command}")
 
+def parse_path(path_string):
+    """
+    Given an API-like path (always starting with '/'), split it into
+    three parts: context, context_item (optional), and subpath (optional).
+
+    Examples:
+      1) "/networks/{networkId}/wireless/ssids/{number}/identityPsks/{identityPskId}"
+         => context="networks"
+            context_item="{networkId}"
+            subpath="/wireless/ssids/{number}/identityPsks/{identityPskId}"
+
+      2) "/networks/{networkId}"
+         => context="networks"
+            context_item="{networkId}"
+            subpath=None
+
+      3) "/networks"
+         => context="networks"
+            context_item=None
+            subpath=None
+    """
+
+    # Remove the leading slash
+    trimmed = path_string.lstrip('/')
+    # Split on slash up to 2 times, so we get at most 3 parts
+    parts = trimmed.split('/', 2)
+
+    # We want exactly three variables: context, context_item, subpath
+    # If there are fewer than 3 parts, pad with None
+    context, context_item, subpath = parts + [None] * (3 - len(parts))
+
+    # If subpath exists, prepend a slash
+    if subpath is not None:
+        subpath = '/' + subpath
+
+    return context, context_item, subpath
+
+def extract_path_variables(path: str, path_spec: str) -> dict:
+    """
+    Given a path (e.g. '/networks/L_123/appliance/vlans/5') and
+    a path_spec (e.g. '/networks/{networkId}/appliance/vlans/{vlanId}'),
+    return a dictionary mapping the placeholder variables (e.g. networkId, vlanId)
+    to their corresponding values in the path (e.g. L_123, 5).
+
+    Assumptions:
+      - The path and path_spec have the same number of segments.
+      - Any segments in path_spec enclosed in '{}' are treated as variable names.
+      - Non-placeholder segments should match exactly, or you can decide how to handle mismatches.
+
+    Example:
+      path       = "/networks/L_1155173304420542812/appliance/vlans/5"
+      path_spec  = "/networks/{networkId}/appliance/vlans/{vlanId}"
+      returns => {'networkId': 'L_1155173304420542812', 'vlanId': '5'}
+    """
+
+    # 1) Strip leading/trailing slashes and split into segments
+    path_segments = path.strip('/').split('/')
+    spec_segments = path_spec.strip('/').split('/')
+
+    if len(path_segments) != len(spec_segments):
+        raise ValueError(
+            f"Segment count mismatch:\n"
+            f"  path has {len(path_segments)} segments: {path_segments}\n"
+            f"  spec has {len(spec_segments)} segments: {spec_segments}"
+        )
+
+    variables = {}
+
+    # 2) Iterate over segments in the spec
+    for p_seg, s_seg in zip(path_segments, spec_segments):
+        # Check if it's a placeholder (e.g. "{networkId}")
+        if s_seg.startswith('{') and s_seg.endswith('}'):
+            var_name = s_seg[1:-1]  # remove surrounding braces
+            variables[var_name] = p_seg
+        else:
+            # If it's not a placeholder, optionally verify exact match
+            if p_seg != s_seg:
+                raise ValueError(
+                    f"Non-placeholder segment mismatch: spec='{s_seg}', path='{p_seg}'. "
+                    "Adjust error handling as needed."
+                )
+
+    return variables
+
+def meraki_get_path(spec_path, **kwargs):
+    if spec_path in openapi_spec['paths']:
+        spec_path_data = openapi_spec['paths'][spec_path]
+        if "get" in spec_path_data:
+            if "operationId" in spec_path_data["get"]:
+                operation_id = spec_path_data["get"]["operationId"]
+            else:
+                event_handler("error", f"Operation ID not found for {spec_path}")
+                return None
+        else:
+            event_handler("error", f"GET method not found for {spec_path}")
+            return None
+    else:
+        event_handler("error", f"Cannot find {spec_path} in OpenAPI spec")
+        return None
+    try:
+        result = dashboard.appliance.getOrganizationApplianceSecurityEvents(args.org_id, **kwargs)
+        return result
+    except meraki.AsyncAPIError as e:
+        event_handler("error", f"Error: {e}")
+        return None
+
+def import_path(path, api_key, base_url, raw_payload, **kwargs):
+    if spec_path := get_spec_path(path):
+        if spec_path in api_path_handlers:
+            unique_key, instance_key = api_path_handlers[spec_path]
+            basepath, placeholder_var = get_basepath(spec_path, 2)
+            existing_item = False
+            event_handler("debug", f"Using default path handler for {path}")
+
+            # Get the variables needed for the API call
+            # path_variables = extract_path_variables(path, spec_path)
+            # Get the basepath for the read
+            
+            basepath_data = meraki_read_path(basepath, args.api_key, args.base_url, **kwargs)
+            if isinstance(basepath_data, list):
+                for item in basepath_data:
+                    if unique_key in item:
+                        if item[unique_key] == raw_payload[unique_key]:
+                            event_handler("debug", f"Found {unique_key} == {raw_payload[unique_key]} in {basepath}")
+                            existing_item = True
+                            if instance_key in item:
+                                instance = item[instance_key]
+                            else:
+                                event_handler("error", f"Cannot find instance key for {basepath}")
+                                return None
+            else:
+                event_handler("error", f"Error reading {basepath}")
+                return None
+            
+            if existing_item:
+                event_handler("debug", f"Writing to {basepath}/{instance}")
+                result = meraki_write_path(f"{basepath}/{instance}" , api_key, base_url, raw_payload, **kwargs)
+            else:
+                event_handler("debug", f"Writing to {basepath}")
+                result = meraki_write_path(basepath, api_key, base_url, raw_payload, **kwargs)
+        else:
+            result = meraki_write_path(path, api_key, base_url, raw_payload, **kwargs)
+    else:
+        event_handler("error", f"Path {path} not found in OpenAPI spec")
+
+#
+# Retreive the data from the import data
+#
+def get_from_import(path):
+    global import_data
+    if import_data == {}:
+        if args.input_file:
+            import_data = import_file(args.input_file)
+        else:
+            event_handler("error", f"Import data not found")
+            return None
+    _, context, context_item, *the_rest = path.split('/')
+    if the_rest:
+        subpath = '/' + '/'.join(the_rest)
+    else:
+        subpath = '/'
+    # Replace with the source org ID from the import file
+    if context == "organizations":
+        context_item = next(iter(import_data["organizations"]))
+    if context in import_data:
+        if context_item in import_data[context]:
+            if subpath in import_data[context][context_item]["paths"]:
+                print (f"Found {subpath} in import data")
+                return import_data[context][context_item]["paths"][subpath]
+            else:
+                return None
+        else:
+            event_handler("error", f"Cannot find {path} in import data")
+            return None
+    else:
+        event_handler("error", f"Cannot find {path} in import data")
+        return None
+        
+def translate_path(path):
+    spec_path = get_spec_path(path)
+    if spec_path in api_path_handlers:
+        unique_key, instance_key = api_path_handlers[spec_path]
+    else:
+        event_handler("error", f"Path {path} not api_path_handlers")
+        return None
+    # Get the data from the import file
+    import_path_data = get_from_import(path)
+    if not import_path_data:
+        event_handler("error", f"Cannot find {path} in import data")
+        return None
+    
+    event_handler("debug", f"Translating Path {path}, {unique_key}: {import_path_data[unique_key]}")
+    basepath, placeholder_var = get_basepath(spec_path, 2)
+    _, context, context_item, *the_rest = basepath.split('/')
+    # Make sure that we are querying the target org
+    if context == "organizations":
+        context_item = args.org_id
+    basepath = '/' + '/'.join([context, context_item] + the_rest)
+    basepath_data = meraki_read_path(basepath, args.api_key, args.base_url)
+    if basepath_data:
+        if isinstance(basepath_data, list):
+            for item in basepath_data:
+                if unique_key in item:
+                    if item[unique_key] == import_path_data[unique_key]:
+                        event_handler("debug", f"Found {item[unique_key]}:{instance_key} = {item[instance_key]}")
+                        return item[instance_key]
+        else:
+            event_handler("error", f"Error reading {basepath}: Not a list")
+            return None
+    else:
+        event_handler("error", f"Error reading {basepath}")
+        return None
+
 def import_command(args):
+    dashboard = meraki.DashboardAPI(api_key=args.api_key, base_url=args.base_url, simulate=args.dry_run, output_log=False)
     #
     # Open the file that we are trying to import
     #
@@ -1144,8 +1870,10 @@ def import_command(args):
                 #
                 if target_config_template_id == None:
                     event_handler("info", f"Creating config template {source_config_template['name']}")
-                    result = meraki_write_path("/organizations/{organizationId}/configTemplates", args.api_key, args.base_url, source_config_template, organizationId=args.org_id)
-                    if result and "id" in result:
+                    result = import_path("/organizations/{organizationId}/configTemplates", args.api_key, args.base_url, source_config_template, organizationId=args.org_id)
+                    if args.dry_run:
+                        pass
+                    elif result and "id" in result:
                         target_config_template_id = result["id"]
                     else:
                         event_handler("critical", f"Error creating template {source_config_template['name']}")
@@ -1155,8 +1883,12 @@ def import_command(args):
                 #
                 source_config_template_data = import_data["networks"][source_config_template["id"]]["paths"]
                 for sub_path, config_template_data in source_config_template_data.items():
-                    path = "/networks/{networkId}" + sub_path
-                    meraki_write_path(path, args.api_key, args.base_url, config_template_data, networkId=target_config_template_id)
+                    if args.subpath and not sub_path.startswith(args.subpath):
+                        # event_handler("debug", f"Skipping import of {sub_path}")
+                        continue
+                    else:
+                        path = "/networks/{networkId}" + sub_path
+                        import_path(path, args.api_key, args.base_url, config_template_data, networkId=target_config_template_id, is_template=True)
             else:
                 event_handler("error", f"Skipping import of template {source_config_template['name']}({source_config_template['id']}) because it is not found in import data.")
     elif args.import_command == "networks":     
@@ -1235,12 +1967,9 @@ def import_command(args):
                     #
                     # Bind the network to the template
                     # 
-                    bind_request_payload = {
-                        "configTemplateId": target_config_template_id,
-                        "autoBind": False
-                    }
                     event_handler("debug", f"Binding network {source_network_name} to template {source_network_template_name}")
-                    meraki_write_path("/networks/{networkId}/bind", args.api_key, args.base_url, bind_request_payload, networkId=target_network_id)
+                    response = dashboard.networks.bindNetwork(target_network_id, target_config_template_id, autoBind=False)
+                    print (response)                
             if not args.create_only:                                       
                 #
                 # Load/Update the network data
@@ -1267,30 +1996,34 @@ def import_command(args):
                             event_handler("error", f"Mapping for source stack {stack['name']} ({stack['id']}) not found")
                 for sub_path, network_data in source_network_paths.items():
                     path = "/networks/{networkId}" + sub_path
-                    #
-                    # Handle the endpoints for each of the SSIDs
-                    #
-                    # if wireless_ssid_match := re.match('^/networks/{networkId}/wireless/ssids/([0-9]+)/([^{}]+)$', path):
-                    #     kwargs["number"] = wireless_ssid_match.group(1)
-                    #     path = "/networks/{networkId}/wireless/ssids/{number}/" + wireless_ssid_match.group(2)
-                    #
-                    # Handle the Stacks
-                    #
-                    stack_match = re.match('^/networks/{networkId}/switch/stacks/([^/]+)/?([^{}]*)$', path)
-                    if stack_match:
-                        source_switchStackId = stack_match.group(1)
-                        print (f"Stack: {source_switchStackId}")
-                        if source_switchStackId in source_stack_map:
-                            kwargs["switchStackId"] = source_stack_map[source_switchStackId]
-                            event_handler("debug", f"Mapping source stack: {source_switchStackId} = {kwargs['switchStackId']}")
-                        else:
-                            event_handler("error", f"Mapping for source stack {source_switchStackId} not found")
-                            continue
-                        path = "/networks/{networkId}/switch/stacks/{switchStackId}/" + stack_match.group(2)
-                    #
-                    # Write the data to the path
-                    #        
-                    meraki_write_path(path, args.api_key, args.base_url, network_data, **kwargs)
+                    if args.subpath and not sub_path.startswith(args.subpath):
+                        # event_handler("debug", f"Skipping import of {sub_path}")
+                        continue
+                    else:                    
+                        #
+                        # Handle the endpoints for each of the SSIDs
+                        #
+                        # if wireless_ssid_match := re.match('^/networks/{networkId}/wireless/ssids/([0-9]+)/([^{}]+)$', path):
+                        #     kwargs["number"] = wireless_ssid_match.group(1)
+                        #     path = "/networks/{networkId}/wireless/ssids/{number}/" + wireless_ssid_match.group(2)
+                        #
+                        # Handle the Stacks
+                        #
+                        # stack_match = re.match('^/networks/{networkId}/switch/stacks/([^/]+)/?([^{}]*)$', path)
+                        # if stack_match:
+                        #     source_switchStackId = stack_match.group(1)
+                        #     print (f"Stack: {source_switchStackId}")
+                        #     if source_switchStackId in source_stack_map:
+                        #         kwargs["switchStackId"] = source_stack_map[source_switchStackId]
+                        #         event_handler("debug", f"Mapping source stack: {source_switchStackId} = {kwargs['switchStackId']}")
+                        #     else:
+                        #         event_handler("error", f"Mapping for source stack {source_switchStackId} not found")
+                        #         continue
+                        #     path = "/networks/{networkId}/switch/stacks/{switchStackId}/" + stack_match.group(2)
+                        #
+                        # Write the data to the path
+                        #        
+                        import_path(path, args.api_key, args.base_url, network_data, is_template=bound_to_template, **kwargs)
     elif args.import_command == "devices":
         for serial in import_data["devices"]:
             # if args.product_types and (sub_path.split('/')[1] in PRODUCT_TYPES and sub_path.split('/')[1] not in args.product_types):
@@ -1311,21 +2044,22 @@ def import_command(args):
                 # Should we remove None values everywhere?
                 if "switchProfileId" in device_data and device_data["switchProfileId"] == None:
                     device_data.pop("switchProfileId", None)
-                meraki_write_path(path, args.api_key, args.base_url, device_data, serial=serial)
+                import_path(path, args.api_key, args.base_url, device_data, serial=serial)
     elif args.import_command == "organizations":
             # Get the key and the value from the dictionary with a single key
             org_import_data = import_data["organizations"]
             key = next(iter(org_import_data))
             source_org_paths = org_import_data[key]["paths"]
             for sub_path, path_data in source_org_paths.items():
-                if args.paths and sub_path not in args.paths:
+                if args.subpath and not sub_path.startswith(args.subpath):
+                    # event_handler("debug", f"Skipping import of {sub_path}")
                     event_handler("debug", f"Skipping {sub_path}")
                     continue
                 path = "/organizations/{organizationId}" + sub_path
                 #
                 # Write the data to the path
                 #
-                meraki_write_path(path, args.api_key, args.base_url, path_data, organizationId=args.org_id)
+                import_path(path, args.api_key, args.base_url, path_data, organizationId=args.org_id)
 
 def claim_command(args):
     claim_list = []
@@ -1444,27 +2178,29 @@ def claim_command(args):
                         event_handler("info", f"Claiming {serials} in network {target_networks_by_id[target_network_id]['name']} ({target_network_id})")
                         claim_serials_into_network(serials, target_network_id)
         else:
-            event_handler("critical", "Input file must be provided when serials is not provided.")   
-
-
-    #     
+            event_handler("critical", "Input file must be provided when serials is not provided.")     
 
 def claim_serials_into_inventory(serials):
     #
     # See what devices are already claimed in the network
     #
     unclaimed_serials = []
+
+    dashboard = meraki.DashboardAPI(api_key=args.api_key, base_url=args.base_url, simulate=args.dry_run, output_log=False)
+
     # Get the current inventory:
-    inventory = meraki_read_path("/organizations/{organizationId}/inventory/devices", args.api_key, args.base_url, organizationId=args.org_id)
+    inventory = dashboard.organizations.getOrganizationInventoryDevices(args.org_id, total_pages='all')
+    # inventory = meraki_read_path("/organizations/{organizationId}/inventory/devices", args.api_key, args.base_url, organizationId=args.org_id)
     inventory_serials = [item["serial"] for item in inventory]
     unclaimed_serials = [serial for serial in serials if serial not in inventory_serials]
     if unclaimed_serials:
-        for batch in batch_iterator(unclaimed_serials, args.batch_size):
-            claim_payload = {
-                "serials": batch
-            }
-            event_handler("info", f"Claiming {batch} into inventory")
-            meraki_write_path("/organizations/{organizationId}/claim", args.api_key, args.base_url, claim_payload, organizationId=args.org_id)
+        event_handler("info", f"Claiming {unclaimed_serials} into inventory")
+        response = dashboard.organizations.claimIntoOrganizationInventory(
+            args.org_id, 
+            # orders=['4CXXXXXXX'], 
+            serials=unclaimed_serials, 
+            # licenses=[{'key': 'Z2XXXXXXXXXX', 'mode': 'addDevices'}]
+        )            
     else:
         event_handler("info", f"No serials to claim in inventory")
 
@@ -1473,6 +2209,9 @@ def claim_serials_into_network(serials, network_id):
     # See what devices are already claimed in the network
     #
     unclaimed_serials = []
+
+    dashboard = meraki.DashboardAPI(api_key=args.api_key, base_url=args.base_url, simulate=args.dry_run, output_log=False)
+
     device_data = meraki_read_path("/networks/{networkId}/devices", args.api_key, args.base_url, networkId=network_id)
     if device_data:
         existing_serials = [device["serial"] for device in device_data]
@@ -1481,19 +2220,18 @@ def claim_serials_into_network(serials, network_id):
 
     unclaimed_serials = [serial for serial in serials if serial not in existing_serials]
     if unclaimed_serials:
-        for batch in batch_iterator(unclaimed_serials, 50):
-            claim_payload = {
-                "serials": batch,
-                "addAtomically": True
-            }
-            event_handler("debug", f"Claiming {batch} in network {network_id}")
-            meraki_write_path("/networks/{networkId}/devices/claim", args.api_key, args.base_url, claim_payload, networkId=network_id)
+        event_handler("debug", f"Claiming {unclaimed_serials} in network {network_id}")
+        response = dashboard.networks.claimNetworkDevices(
+            network_id, unclaimed_serials
+        )          
     else:
         event_handler("debug", f"No serials to claim in network {network_id}")
 
 def unclaim_command(args):
     unclaim_list = []
     import_data = {}
+
+    dashboard = meraki.DashboardAPI(api_key=args.api_key, base_url=args.base_url, simulate=args.dry_run, output_log=False)
 
     # First we need to figure out where to get the data that we need, either
     # an input file or the API
@@ -1565,31 +2303,22 @@ def unclaim_command(args):
             for item in unclaim_list:
                 event_handler("info", f"Rebooting {item['serial']}.")
                 payload = {}
-                meraki_write_path("/devices/{serial}/reboot", args.api_key, args.base_url, payload, serial=item['serial'])
-                payload = {
-                    "serial": item['serial']
-                }
+                response = dashboard.devices.rebootDevice(item['serial'])
                 event_handler("info", f"Removing {item['serial']} from network {item['networkId']}")
-                meraki_write_path("/networks/{networkId}/devices/remove", args.api_key, args.base_url, payload, networkId=item['networkId'])    
+                response = dashboard.networks.removeNetworkDevices(item['networkId'], item['serial'])
             serials_list = [item["serial"] for item in unclaim_list]
-            payload = {
-                "serials": serials_list
-            }
             event_handler("debug", f"Unclaiming {serials_list} in org {args.org_id}")
-            meraki_write_path("/organizations/{organizationId}/inventory/release", args.api_key, args.base_url, payload, organizationId=args.org_id)
-    else:
+            response = dashboard.organizations.releaseFromOrganizationInventory(
+                args.org_id, 
+                serials=serials_list
+            )            
         event_handler("warning", "No devices to unclaim.")
-
-def batch_iterator(lst, batch_size):
-    # Generator to yield batches of the specified size
-    for i in range(0, len(lst), batch_size):
-        yield lst[i:i + batch_size]
 
 def remove_command(args):
     remove_list = []
     import_data = {}
 
-    dashboard = meraki.DashboardAPI(api_key=args.api_key, base_url=args.base_url, simulate=args.dry_run)
+    dashboard = meraki.DashboardAPI(api_key=args.api_key, base_url=args.base_url, simulate=args.dry_run, output_log=False)
 
     # First we need to figure out where to get the data that we need, either
     # an input file or the API
@@ -1669,52 +2398,39 @@ def remove_command(args):
                     event_handler("info", f"Rebooting {item['serial']}.")
                     response = dashboard.devices.rebootDevice(item['serial'])
                     event_handler("debug", response)
-                # payload = {}
-                # meraki_write_path("/devices/{serial}/reboot", args.api_key, args.base_url, payload, serial=item['serial'])
-                # payload = {
-                #     "serial": item['serial']
-                # }
                 event_handler("info", f"Removing {item['serial']} from network {item['networkId']}")
                 response = dashboard.networks.removeNetworkDevices(item['networkId'], item['serial'])
                 event_handler("debug", response)
-                # meraki_write_path("/networks/{networkId}/devices/remove", args.api_key, args.base_url, payload, networkId=item['networkId'])    
-            # serials_list = [item["serial"] for item in unclaim_list]
-            # payload = {
-            #     "serials": serials_list
-            # }
-            # event_handler("debug", f"Unclaiming {serials_list} in org {args.org_id}")
-            # meraki_write_path("/organizations/{organizationId}/inventory/release", args.api_key, args.base_url, payload, organizationId=args.org_id)
     else:
         event_handler("warning", "No devices to remove.")
 
 def release_command(args):
+    device_list = []
     release_list = []
 
-    dashboard = meraki.DashboardAPI(api_key=args.api_key, base_url=args.base_url, simulate=args.dry_run)
+    dashboard = meraki.DashboardAPI(api_key=args.api_key, base_url=args.base_url, simulate=args.dry_run, output_log=False)
 
     # If a data file is provided, use that data instead of making an API call
     if args.input_file:
         import_data = import_file(args.input_file)
-        source_org_id = next(iter(import_data["organizations"]))
-        inventory = import_data["organizations"][source_org_id]["paths"]["/inventory/devices"]
-        if args.serials:
-            # If we were given a list of serial numbers, we need to make sure they are in the inventory
-            for serial in args.serials:
-                if serial in inventory_serials:
-                    release_list.append(serial)
-                else:
-                    event_handler("error", f"Serial {serial} not found in inventory.")
-            else:
-                release_list = [item["serial"] for item in inventory]
+        for serial, device_data in import_data["devices"].items():
+            if "/" in device_data["paths"]:
+                device_list.append(serial)
+    elif args.serials:
+        device_list = args.serials
     else:
-        kwargs = {}
-        if args.serials:
-            kwargs["serials"] = args.serials
-            # inventory = meraki_read_path("/organizations/{organizationId}/inventory/devices", args.api_key, args.base_url, organizationId=args.org_id)
-            inventory = dashboard.organizations.getOrganizationInventoryDevices(args.org_id, total_pages='all', **kwargs)
-            release_list = [item["serial"] for item in inventory]
+        event_handler("critical", "Input file or serials argument must be provided.")
+
+    #
+    # Check to make sure these these devices are in the inventory
+    #
+    inventory = dashboard.organizations.getOrganizationInventoryDevices(args.org_id, total_pages='all')
+    inventory_serials = [item["serial"] for item in inventory]
+    for serial in device_list:
+        if serial in inventory_serials:
+            release_list.append(serial)
         else:
-            event_handler("critical", "Input file or serials argument must be provided.")
+            event_handler("error", f"Serial {serial} not found in inventory.")
 
     if release_list:
         print (release_list)
@@ -1725,21 +2441,14 @@ def release_command(args):
                 serials=release_list
             )
             event_handler("debug", response)
-            # # Process the list in batches of 50
-            # for batch in batch_iterator(release_list, args.batch_size):
-            #     payload = {
-            #         "serials": batch
-            #     }
-            #     event_handler("info", f"Releasing: {batch}")
-            #     meraki_write_path("/organizations/{organizationId}/inventory/release", args.api_key, args.base_url, payload, organizationId=args.org_id)    
     else:
         event_handler("warning", "No devices to release.")
 
 def create_command(args):
-    # For the show commands, we are going to use the meraki python library to get the data
+    # For the create commands, we are going to use the meraki python library to get the data
     # because it makes it a bit easeier and we do not have to worry about the API paths
     # not being there.
-    dashboard = meraki.DashboardAPI(api_key=args.api_key, base_url=args.base_url)
+    dashboard = meraki.DashboardAPI(api_key=args.api_key, base_url=args.base_url, simulate=args.dry_run,)
 
     if args.create_command == 'networks':
         try:
@@ -1752,6 +2461,82 @@ def create_command(args):
             )
         except meraki.exceptions.APIError as err:
             event_handler("error", err.message['errors'])
+    elif args.create_command == 'client':
+        import_data = import_file(args.input_file)
+        clients_by_network = {}
+        network_list = dashboard.organizations.getOrganizationNetworks(args.org_id, total_pages='all')
+        networks_by_name = {network['name']: network for network in network_list}
+        for client in import_data:
+            if client["network"] in networks_by_name:
+                network_id = networks_by_name[client["network"]]["id"]
+                if networks_by_name[client["network"]]["isBoundToConfigTemplate"]:
+                    template_id = networks_by_name[client["network"]]["configTemplateId"]
+                else:
+                    template_id = None
+                if network_id not in clients_by_network:
+                    clients_by_network[network_id] = {
+                        'template_id': template_id,
+                        'network': networks_by_name[client["network"]]["name"],
+                        'clients': []
+                    }
+                clients_by_network[network_id]["clients"].append(client)
+            else:
+                event_handler("error", f"Network {client['network']} not found in organization {args.org_id}")
+
+        for network_id, data in clients_by_network.items():
+            if data["template_id"]:
+                use_network_id = data["template_id"]
+            else:
+                use_network_id = network_id
+            network_group_policies = dashboard.networks.getNetworkGroupPolicies(use_network_id)
+            group_policy_by_name = {network_group_policy['name']: network_group_policy for network_group_policy in network_group_policies}
+            macs_by_policy = {}
+            for client in data["clients"]:
+                clients = [{'mac': client["mac"], 'name': client["name"]}]
+                device_policy = 'Group policy'
+                group_policy_name = client["assigned"][0]["name"]
+                if group_policy_name not in macs_by_policy:
+                    macs_by_policy[group_policy_name] = []
+                macs_by_policy[group_policy_name].append(client["mac"])
+            print(data["network"])
+            for group_policy_name, macs in macs_by_policy.items():
+                print(group_policy_name)
+                print(" ".join(macs))
+                # print (f"{client['name']}, {client['mac']} {group_policy_name}")
+                # if group_policy_name in group_policy_by_name:
+                #     groupPolicyId = group_policy_by_name[group_policy_name]["groupPolicyId"]
+                #     response = dashboard.networks.provisionNetworkClients(
+                #         network_id, clients, device_policy, groupPolicyId=groupPolicyId
+                #         # policiesBySecurityAppliance={'devicePolicy': 'Normal'}, 
+                #         # policiesBySsid={'0': {'devicePolicy': 'Group policy', 'groupPolicyId': '101'}, '1': {'devicePolicy': 'Group policy', 'groupPolicyId': '101'}, '2': {'devicePolicy': 'Group policy', 'groupPolicyId': '101'}, '3': {'devicePolicy': 'Group policy', 'groupPolicyId': '101'}, '4': {'devicePolicy': 'Group policy', 'groupPolicyId': '101'}, '5': {'devicePolicy': 'Group policy', 'groupPolicyId': '101'}, '6': {'devicePolicy': 'Group policy', 'groupPolicyId': '101'}, '7': {'devicePolicy': 'Group policy', 'groupPolicyId': '101'}, '8': {'devicePolicy': 'Group policy', 'groupPolicyId': '101'}, '9': {'devicePolicy': 'Group policy', 'groupPolicyId': '101'}, '10': {'devicePolicy': 'Group policy', 'groupPolicyId': '101'}, '11': {'devicePolicy': 'Group policy', 'groupPolicyId': '101'}, '12': {'devicePolicy': 'Group policy', 'groupPolicyId': '101'}, '13': {'devicePolicy': 'Group policy', 'groupPolicyId': '101'}, '14': {'devicePolicy': 'Group policy', 'groupPolicyId': '101'}}
+                #     )
+                # else:
+                #     event_handler("error", f"Group policy {group_policy_name} not found in network {network_id}")
+                #     continue
+
+
+def update_command(args):
+    # For the create commands, we are going to use the meraki python library to get the data
+    # because it makes it a bit easeier and we do not have to worry about the API paths
+    # not being there.
+    dashboard = meraki.DashboardAPI(api_key=args.api_key, base_url=args.base_url)
+
+    if args.update_command == 'client-policy':
+        import_data = import_file(args.input_file)
+        network_list = dashboard.organizations.getOrganizationNetworks(args.org_id, total_pages='all')
+        networks_by_name = {network['name']: network for network in network_list}
+        for client in import_data:
+            if client["network"] in networks_by_name:
+                network_id = networks_by_name[client["network"]]["id"]
+                print (f"Found {client['clientId']} in network {network_id}")
+                response = dashboard.networks.updateNetworkClientPolicy(
+                    network_id, client_id, device_policy, 
+                    groupPolicyId='101'
+                )
+            else:
+                event_handler("error", f"Network {client['network']} not found in organization {args.org_id}")
+            print(client)
+
 
 def prompt_user(message, options):
     """
@@ -1815,21 +2600,22 @@ def event_handler(severity: str, message: str):
         if args.exit_on_error:
             sys.exit(1)
 
+COLORS = {
+    "green": "\033[0;32m",
+    "yellow": "\033[0;33m",
+    "orange": "\033[38;5;208m",
+    "red": "\033[0;31m",
+    "blue": "\033[0;34m",
+    "reset": "\033[0m"
+}
+
 # Define log level colors
 LOG_COLORS = {
     logging.DEBUG: "\033[0;37m",  # White
     logging.INFO: "\033[0;36m",   # Cyan
-    logging.WARNING: "\033[0;33m",# Yellow
+    logging.WARNING: COLORS["orange"],# Yellow
     logging.ERROR: "\033[0;31m",  # Red
     logging.CRITICAL: "\033[1;31m" # Bold Red
-}
-
-COLORS = {
-    "green": "\033[0;32m",
-    "yellow": "\033[0;33m",
-    "red": "\033[0;31m",
-    "blue": "\033[0;34m",
-    "reset": "\033[0m"
 }
 
 def color_message(message, color):
@@ -1886,6 +2672,7 @@ def parse_app_args(arguments=None):
     parser_export.add_argument('--networks', nargs='+', help='A list of network IDs to export.')
     parser_export.add_argument('--network_ids', nargs='+', help='A list of network IDs to export.')
     parser_export.add_argument('--full', help='Export all paths', action='store_true')
+    parser_export.add_argument('--skip-templates', help='Skip exporting the templates to which networks are bound', action='store_true')
     parser_export.add_argument('--contexts', nargs='+', default=['organizations','networks','devices'], choices=['organizations','networks','devices', 'inventory'], help='API base paths to import.')
 
 
@@ -1899,10 +2686,10 @@ def parse_app_args(arguments=None):
     # Subcommand: `import organizations`
     parser_import_organizations = import_subparsers.add_parser('organizations', help='Import Organizations')
     parser_import_organizations.add_argument('--source-org-id', help='Source Org ID')
-    parser_import_organizations.add_argument('--paths', nargs='+', help='The Paths to import.')
     parser_import_organizations.add_argument('-i', '--input-file', type=str, required=True, help='The path to the output JSON file.')
     parser_import_organizations.add_argument('--dry-run', help='Do name make a change', action='store_true')
     parser_import_organizations.add_argument('--diff', help='Print Diff', action='store_true')
+    parser_import_organizations.add_argument('--subpath', type=str, help='The Subpath to import.')
     # Subcommand: `import networks`
     parser_import_networks = import_subparsers.add_parser('networks', help='Import networks')
     parser_import_networks.add_argument('--dry-run', help='Do name make a change', action='store_true')
@@ -1911,6 +2698,7 @@ def parse_app_args(arguments=None):
     parser_import_networks.add_argument('--diff', help='Print Diff', action='store_true')
     parser_import_networks.add_argument('--always-write', help='Ignore diff and always write to api', action='store_true')
     parser_import_networks.add_argument('--create-only', help='Only create/bind the network', action='store_true')   
+    parser_import_networks.add_argument('--subpath', type=str, help='The Subpath to import.')
     # Subcommand: `import devices`
     parser_import_devices = import_subparsers.add_parser('devices', help='Import devices')
     parser_import_devices.add_argument('-i', '--input-file', type=str, required=True, help='The path to the output JSON file.')
@@ -1927,6 +2715,7 @@ def parse_app_args(arguments=None):
     parser_import_templates.add_argument('-i', '--input-file', type=str, required=True, help='The path to the output JSON file.')
     parser_import_templates.add_argument('--diff', help='Print Diff', action='store_true')
     parser_import_templates.add_argument('--always-write', help='Ignore diff and always write to api', action='store_true')
+    parser_import_templates.add_argument('--subpath', type=str, help='The Subpath to import.')
 
     #
     # Subparser for `show` command
@@ -1968,10 +2757,19 @@ def parse_app_args(arguments=None):
     # Subcommand: `show templates`
     parser_show_templates = show_subparsers.add_parser('templates', help='Show templates')
     parser_show_templates.add_argument('--org-id', help='Org ID', default=os.getenv('MERAKI_ORG_ID'), type=str)
+    parser_show_templates.add_argument('-i', '--input-file', type=str, help='The path to the output JSON file.')
+    parser_show_templates.add_argument('--json', help='Show output in JSON', action='store_true')
+
+    # Subcommand: `show client-policy`
+    parser_show_clients = show_subparsers.add_parser('client-policy', help='Show Client Policy')
+    parser_show_clients.add_argument('--org-id', help='Org ID', default=os.getenv('MERAKI_ORG_ID'), type=str)
+    parser_show_clients.add_argument('--json', help='Show output in JSON', action='store_true')
+    parser_show_clients.add_argument('--timespan', type=int, default=7, help='Timespan in days.')
+    parser_show_clients.add_argument('-o', '--output-file', type=str, help='The path to the output file.')
 
     # Subcommand: `show me`
-    parser_show_templates = show_subparsers.add_parser('me', help='Show Current User')
-    parser_show_templates.add_argument('--org-id', help='Org ID', default=os.getenv('MERAKI_ORG_ID'), type=str)    
+    parser_show_me = show_subparsers.add_parser('me', help='Show Current User')
+    parser_show_me.add_argument('--org-id', help='Org ID', default=os.getenv('MERAKI_ORG_ID'), type=str)    
 
     # Subcommand: `show admins`
     parser_show_admins = show_subparsers.add_parser('admins', help='Show Current User')
@@ -1992,11 +2790,30 @@ def parse_app_args(arguments=None):
     create_subparsers = parser_create.add_subparsers(dest='create_command', help='Create Resources')
 
     # Subcommand: `create networks`
-    parser_create_newtorks = create_subparsers.add_parser('networks', help='Create Networks')
-    parser_create_newtorks.add_argument('--org-id', help='Org ID', default=os.getenv('MERAKI_ORG_ID'), type=str)
-    parser_create_newtorks.add_argument('--name', help='Network Name', required=True, type=str)
-    parser_create_newtorks.add_argument('--product-types', nargs='+', default=['appliance', 'switch', 'wireless'], help="Product Types")
-    parser_create_newtorks.add_argument('--tags', nargs='+', default=[], help="Tags")
+    parser_create_networks = create_subparsers.add_parser('networks', help='Create Networks')
+    parser_create_networks.add_argument('--org-id', help='Org ID', default=os.getenv('MERAKI_ORG_ID'), type=str)
+    parser_create_networks.add_argument('--name', help='Network Name', required=True, type=str)
+    parser_create_networks.add_argument('--product-types', nargs='+', default=['appliance', 'switch', 'wireless'], help="Product Types")
+    parser_create_networks.add_argument('--tags', nargs='+', default=[], help="Tags")
+    parser_create_networks.add_argument('--dry-run', help='Do name make a change', action='store_true')
+
+    # Subcommand: `create client`
+    parser_create_clients = create_subparsers.add_parser('client', help='Create Client Policy')
+    parser_create_clients.add_argument('--org-id', help='Org ID', default=os.getenv('MERAKI_ORG_ID'), type=str)
+    parser_create_clients.add_argument('-i', '--input-file', required=True, type=str, help='The path to the input JSON file.')
+    parser_create_clients.add_argument('--dry-run', help='Do name make a change', action='store_true')
+
+    #
+    # Subparser for `update` command
+    #
+    parser_update = subparsers.add_parser('update', help='Update Resources')
+    parser_update.set_defaults(func=update_command)
+    update_subparsers = parser_update.add_subparsers(dest='update_command', help='Update Resources')
+
+    # Subcommand: `update client-policy`
+    parser_update_clients = update_subparsers.add_parser('client-policy', help='Update Client Policy')
+    parser_update_clients.add_argument('--org-id', help='Org ID', default=os.getenv('MERAKI_ORG_ID'), type=str)
+    parser_update_clients.add_argument('-i', '--input-file', required=True, type=str, help='The path to the input JSON file.')
 
     #
     # Subparser for `release` command
